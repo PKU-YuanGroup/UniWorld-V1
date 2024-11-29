@@ -6,7 +6,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, Subset
 import argparse
 import logging
-from colorlog import ColoredFormatter
 import tqdm
 from itertools import chain
 import wandb
@@ -23,7 +22,6 @@ from torch import nn
 from causalvideovae.model import *
 from causalvideovae.model.ema_model import EMA
 from causalvideovae.dataset.ddp_sampler import CustomDistributedSampler
-from causalvideovae.dataset.video_dataset import TrainVideoDataset, ValidVideoDataset
 from causalvideovae.model.utils.module_utils import resolve_str_to_obj
 from causalvideovae.utils.video_utils import tensor_to_image
 from causalvideovae.model.losses import ClipLoss
@@ -212,14 +210,14 @@ def valid(global_rank, rank, model, val_dataloader, precision, args):
                         num_video_log -= 1
 
                 # Calculate PSNR
-                mse = torch.mean(torch.square(inputs - video_recon), dim=(1, 2, 3))
+                mse = torch.mean(torch.square((torch.clip(inputs, -1, 1)+1)*2 - (torch.clip(video_recon, -1, 1)+1)*2), dim=list(range(video_recon.ndim))[1:])
                 psnr = 20 * torch.log10(1 / torch.sqrt(mse))
                 psnr = psnr.mean().detach().cpu().item()
 
                 # Calculate LPIPS
                 if args.eval_lpips:
                     lpips_score = (
-                        lpips_model.forward(inputs, video_recon)
+                        lpips_model.forward(torch.clip(inputs, -1, 1), torch.clip(video_recon, -1, 1))
                         .mean()
                         .detach()
                         .cpu()

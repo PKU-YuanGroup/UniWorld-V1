@@ -1,237 +1,231 @@
-import os
-from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Subset
+import argparse
 from tqdm import tqdm
+import torch
 import sys
-from glob import glob
-import multiprocessing as mp
+from torch.utils.data import DataLoader, Subset
+import os
 sys.path.append(".")
-from causalvideovae.eval.cal_lpips import calculate_lpips
-from causalvideovae.eval.cal_fvd import calculate_fvd
-from causalvideovae.eval.cal_psnr import calculate_psnr
-from causalvideovae.eval.cal_ssim import calculate_ssim
-from causalvideovae.dataset.video_dataset import (
-    ValidVideoDataset,
-    DecordInit,
-    Compose,
-    Lambda,
-    resize,
-    CenterCropVideo,
-    ToTensorVideo
-)
+from causalvideovae.model import *
 from accelerate import Accelerator
+import numpy as np
+from torchvision.datasets import ImageFolder
+from torchvision import transforms
+from PIL import Image
+from glob import glob
+from PIL import Image
+import lpips
+import cv2
+from torch.utils.data import Dataset
+from einops import rearrange
 
-class EvalDataset(ValidVideoDataset):
-    def __init__(
-        self,
-        real_video_dir,
-        generated_video_dir,
-        num_frames,
-        sample_rate=1,
-        crop_size=None,
-        resolution=128,
-    ) -> None:
-        self.is_main_process = False
-        self.v_decoder = DecordInit()
-        self.real_video_files = []
-        self.generated_video_files = self._make_dataset(generated_video_dir)
-        for video_file in self.generated_video_files:
-            filename = os.path.basename(video_file)
-            if not os.path.exists(os.path.join(real_video_dir, filename)):
-                raise Exception(os.path.join(real_video_dir, filename))
-            self.real_video_files.append(os.path.join(real_video_dir, filename))
-        self.num_frames = num_frames
-        self.sample_rate = sample_rate
-        self.crop_size = crop_size
-        self.short_size = resolution
-        self.transform = Compose(
-            [
-                ToTensorVideo(),
-                Lambda(lambda x: resize(x, self.short_size)),
-                (
-                    CenterCropVideo(crop_size)
-                    if crop_size is not None
-                    else Lambda(lambda x: x)
-                ),
-            ]
+def center_crop_arr(pil_image, image_size):
+    """
+    Center cropping implementation from ADM.
+    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
+    """
+    while min(*pil_image.size) >= 2 * image_size:
+        pil_image = pil_image.resize(
+            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
         )
 
-    def _make_dataset(self, real_video_dir):
-        samples = []
-        samples += sum(
-            [
-                glob(os.path.join(real_video_dir, f"*.{ext}"), recursive=True)
-                for ext in self.video_exts
-            ],
-            [],
-        )
-        return samples
-    
+    scale = image_size / min(*pil_image.size)
+    pil_image = pil_image.resize(
+        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
+    )
+
+    arr = np.array(pil_image)
+    crop_y = (arr.shape[0] - image_size) // 2
+    crop_x = (arr.shape[1] - image_size) // 2
+    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
+
+
+def calculate_ssim(image1, image2):
+    ssims = []
+    image1 = image1.cpu().float()
+    image2 = image2.cpu().float()
+    image1 = rearrange(image1, 'b c h w -> (b c) h w').numpy().astype(np.float64)
+    image2 = rearrange(image2, 'b c h w -> (b c) h w').numpy().astype(np.float64)
+
+    for img1, img2 in zip(image1, image2):
+        C1 = 0.01 ** 2
+        C2 = 0.03 ** 2
+        kernel = cv2.getGaussianKernel(11, 1.5)
+        window = np.outer(kernel, kernel.transpose())
+        mu1 = cv2.filter2D(img1, -1, window)[5:-5, 5:-5]  # valid
+        mu2 = cv2.filter2D(img2, -1, window)[5:-5, 5:-5]
+        mu1_sq = mu1 ** 2
+        mu2_sq = mu2 ** 2
+        mu1_mu2 = mu1 * mu2
+        sigma1_sq = cv2.filter2D(img1 ** 2, -1, window)[5:-5, 5:-5] - mu1_sq
+        sigma2_sq = cv2.filter2D(img2 ** 2, -1, window)[5:-5, 5:-5] - mu2_sq
+        sigma12 = cv2.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
+                                                                (sigma1_sq + sigma2_sq + C2))
+        ssims.append(ssim_map.mean())
+    return np.array(ssims).mean()
+
+def calculate_psnr(video_recon, inputs, device=None):
+    mse = torch.mean(torch.square(inputs - video_recon), dim=list(range(video_recon.ndim))[1:])
+    psnr = 20 * torch.log10(1 / torch.sqrt(mse))
+    psnr = psnr.mean().detach()
+    if psnr == torch.inf:
+        return 100
+    return psnr.cpu().item()
+
+class ImageDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        """
+        Args:
+            root_dir (str): Path to the directory containing images.
+            transform (callable, optional): Transform to be applied to each image.
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_paths = glob(f'{root_dir}/*jpg')
+
     def __len__(self):
-        return len(self.real_video_files)
+        return len(self.image_paths)
 
-    def __getitem__(self, index):
-        if index >= len(self):
-            raise IndexError(len(self.generated_video_files))
-        real_video_file = self.real_video_files[index]
-        generated_video_file = self.generated_video_files[index]
-        real_video_tensor = self._load_video(real_video_file, self.sample_rate)
-        generated_video_tensor = self._load_video(generated_video_file, 1)
-        return {"real": self.transform(real_video_tensor), "generated": self.transform(generated_video_tensor)}
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        return image, 0
 
 
-def calculate_common_metric(accelerator, args, dataloader, device):
-    score_list = []
-    if args.metric == "fvd":
-        if args.fvd_method == 'styleganv':
-            from causalvideovae.eval.fvd.styleganv.fvd import load_i3d_pretrained
-        elif args.fvd_method == 'videogpt':
-            from causalvideovae.eval.fvd.videogpt.fvd import load_i3d_pretrained
-        print(args.fvd_method)
-        i3d = load_i3d_pretrained(device)
-        
-    for batch_data in tqdm(dataloader, disable=not accelerator.is_local_main_process):
-        real_videos = batch_data["real"].to(device)
-        generated_videos = batch_data["generated"].to(device)
-
-        assert real_videos.shape[2] == generated_videos.shape[2]
-        if args.metric == "fvd":
-            tmp_list = list(
-                calculate_fvd(
-                    real_videos, generated_videos, args.device, i3d=i3d, method=args.fvd_method
-                )["value"].values()
-            )
-        elif args.metric == "ssim":
-            tmp_list = list(
-                calculate_ssim(real_videos, generated_videos)["value"].values()
-            )
-        elif args.metric == "psnr":
-            tmp_list = [calculate_psnr(real_videos, generated_videos)]
-        else:
-            tmp_list = [calculate_lpips(real_videos, generated_videos, args.device)]
-        score_list += tmp_list
-    score_list = [np.mean(score_list)]
-    score_list = accelerator.gather_for_metrics(score_list)
-    if accelerator.is_main_process:
-        return np.mean(score_list)
-    return None
-
-def calculate_common_metric_mp(args, dataloader):
-    pool = mp.Pool(processes=mp.cpu_count())
-    results = []
-    for data in tqdm(dataloader, desc="submit task to process"):
-        real_videos = data["real"]
-        generated_videos = data["generated"]
-        assert real_videos.shape == generated_videos.shape
-        if args.metric == "fvd":
-            raise RuntimeError("Use cuda")
-        elif args.metric == "ssim":
-            results.append(pool.apply_async(calculate_ssim, args=(real_videos, generated_videos)))
-        elif args.metric == "psnr":
-            results.append(pool.apply_async(calculate_psnr, args=(real_videos, generated_videos)))
-        elif args.metric == "lpips":
-            ...
-        else:
-            raise NotImplementedError("No metric")
+def save_tensor_as_image(tensor, save_path):
+    """
+    Save a tensor with value range [-1, 1] as an image.
     
+    Args:
+        tensor (torch.Tensor): Input tensor with shape (C, H, W) and values in [-1, 1].
+        save_path (str): Path to save the image.
+    """
+    # Check tensor shape
+    assert tensor.dim() == 3, "Tensor must have 3 dimensions (C, H, W)."
+    tensor = torch.clip(tensor, -1, 1)
     
-    score_list = []
-    for result in tqdm(results):
-        score_list += list(result.get()["value"].values())
-        
-    pool.close()
-    pool.join()
+    # Rescale from [-1, 1] to [0, 1]
+    tensor = (tensor + 1) / 2.0
     
-    return np.mean(score_list)
-        
+    # Convert tensor to PIL image
+    to_pil = transforms.ToPILImage()
+    image = to_pil(tensor.detach().cpu().float())
+    
+    # Save the image
+    image.save(save_path)
 
-def main():
+@torch.no_grad()
+def main(args: argparse.Namespace):
     accelerator = Accelerator()
+    device = accelerator.device
     
-    if args.device is None:
-        device = torch.device("cuda" if (torch.cuda.is_available()) else "cpu")
-    else:
-        device = torch.device(args.device)
-
-    if args.num_workers is None:
-        try:
-            num_cpus = len(os.sched_getaffinity(0))
-        except AttributeError:
-            num_cpus = os.cpu_count()
-        num_workers = min(num_cpus, 8) if num_cpus is not None else 0
-    else:
-        num_workers = args.num_workers
-
-    dataset = EvalDataset(
-        args.real_video_dir,
-        args.generated_video_dir,
-        num_frames=args.num_frames,
-        sample_rate=args.sample_rate,
-        crop_size=args.crop_size,
-        resolution=args.resolution,
-    )
+    device = args.device
+    batch_size = args.batch_size
+    num_workers = args.num_workers
+    subset_size = args.subset_size
     
-    if args.subset_size:
-        indices = list(range(args.subset_size))
+    
+    data_type = torch.bfloat16
+    if args.output_save_dir is not None:
+        os.makedirs(args.output_save_dir, exist_ok=True)
+
+    # ---- Load Model ----
+    lpips_model = lpips.LPIPS(net="alex", spatial=True)
+    lpips_model.to(device)
+    lpips_model.requires_grad_(False)
+    lpips_model.eval()
+    
+
+    device = args.device
+    model_cls = ModelRegistry.get_model(args.model_name)
+    vae = model_cls.from_pretrained(args.from_pretrained)
+    vae = vae.to(device).to(data_type)
+    if args.enable_tiling:
+        vae.enable_tiling()
+
+    # ---- Prepare Dataset ----
+    transform = transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.resolution)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+    dataset = ImageDataset(args.image_path, transform=transform)
+    # dataset = ImageFolder(args.image_path, transform=transform)
+
+    if subset_size:
+        indices = range(subset_size)
         dataset = Subset(dataset, indices=indices)
-
+        
     dataloader = DataLoader(
-        dataset, args.batch_size, num_workers=num_workers, pin_memory=True
+        dataset, batch_size=batch_size, pin_memory=False, num_workers=num_workers
     )
-    if args.mp:
-        if not accelerator.is_main_process:
-            raise Exception("MP mode shouldn't use accelerate")
-        metric_score = calculate_common_metric_mp(args, dataloader)
-        print(metric_score)
-    else:
-        dataloader = accelerator.prepare(dataloader)
-        metric_score = calculate_common_metric(accelerator, args, dataloader, device)
-        if accelerator.is_main_process:
-            print(metric_score)
+    dataloader = accelerator.prepare(dataloader)
 
+    # ---- Inference ----
+    psnr_results = []
+    lpips_results = []
+    ssim_results = []
+    cnt = 0
+    for batch in tqdm(dataloader, disable=not accelerator.is_local_main_process):
+        x, labels = batch
+        labels = labels.reshape(-1, 1)
+        x = x.to(device=device, dtype=data_type)  # b c h w
+        
+        z, z_t = vae.encode(x=x, input_ids=labels).latent_dist.sample()
+        image_recon, text_recon = vae.decode(z, z_t).sample
+        if args.output_save_dir is not None:
+            for i in image_recon:
+                save_path = f'{args.output_save_dir}/rank{accelerator.process_index}_{cnt}.jpg'
+                save_tensor_as_image(i, save_path)
+                cnt += 1
 
-def parse_args():
-    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--batch_size", type=int, default=2, help="Batch size to use")
-    parser.add_argument("--real_video_dir", type=str, help=("the path of real videos`"))
-    parser.add_argument("--fvd_method", type=str, default="styleganv")
-    parser.add_argument(
-        "--generated_video_dir", type=str, help=("the path of generated videos`")
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Device to use. Like cuda, cuda:0 or cpu",
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=8,
-        help=(
-            "Number of processes to use for data loading. "
-            "Defaults to `min(8, num_cpus)`"
-        ),
-    )
-    parser.add_argument("--sample_fps", type=int, default=30)
-    parser.add_argument("--resolution", type=int, default=336)
-    parser.add_argument("--crop_size", type=int, default=None)
-    parser.add_argument("--num_frames", type=int, default=100)
-    parser.add_argument("--sample_rate", type=int, default=1)
-    parser.add_argument("--subset_size", type=int, default=None)
-    parser.add_argument("--mp", action="store_true", help="")
-    parser.add_argument(
-        "--metric",
-        type=str,
-        default="fvd",
-        choices=["fvd", "psnr", "ssim", "lpips", "flolpips"],
-    )
-    args = parser.parse_args()
-    return args
+        
+        psnr_results.append(calculate_psnr((torch.clip(image_recon, -1, 1) + 1) / 2, (torch.clip(x, -1, 1) + 1) / 2))
 
+        ssim_results.append(calculate_ssim((torch.clip(image_recon, -1, 1) + 1) / 2, (torch.clip(x, -1, 1) + 1) / 2))
+        lpips_score = (
+                        lpips_model.forward(torch.clip(x, -1, 1), torch.clip(image_recon, -1, 1))
+                        .mean()
+                        .detach()
+                        .cpu()
+                        .item()
+                    )
+        lpips_results.append(lpips_score)
+
+    psnr_results = torch.tensor(psnr_results).to(device)
+    psnr_results_list = accelerator.gather(psnr_results)
+
+    lpips_results = torch.tensor(lpips_results).to(device)
+    lpips_results_list = accelerator.gather(lpips_results)
+
+    ssim_results = torch.tensor(ssim_results).to(device)
+    ssim_results_list = accelerator.gather(ssim_results)
+
+    if accelerator.process_index == 0:
+        print(
+            f'psnr: {psnr_results_list.mean().item()}\n'
+            f'lpips: {lpips_results_list.mean().item()}\n'
+            f'ssim: {ssim_results_list.mean().item()}\n'
+            )
+        
 
 if __name__ == "__main__":
-    args = parse_args()
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image_path", type=str, default="")
+    parser.add_argument("--from_pretrained", type=str, default="")
+    parser.add_argument("--resolution", type=int, default=336)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--subset_size", type=int, default=None)
+    parser.add_argument('--enable_tiling', action='store_true')
+    parser.add_argument('--cls_data', action='store_true')
+    parser.add_argument("--model_name", type=str, default=None, help="")
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--output_save_dir", type=str, default=None)
+
+    args = parser.parse_args()
+    main(args)
+    

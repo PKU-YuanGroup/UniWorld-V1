@@ -25,7 +25,7 @@ torchrun \
     train_ddp.py \
     --exp_name ${EXP_NAME} \
     --video_path /storage/dataset/imagenet/imagenet/train \
-    --eval_video_path /storage/dataset/imagenet/imagenet/val/ \
+    --eval_video_path /storage/dataset/val2017/ \
     --model_name MMVAE \
     --model_config /storage/lb/DiT/WF-VAE/config_t.json \
     --resolution 256 \
@@ -40,7 +40,7 @@ torchrun \
     --eval_batch_size 1 \
     --eval_num_frames 33 \
     --eval_sample_rate 1 \
-    --eval_subset_size 50000 \
+    --eval_subset_size 5000 \
     --eval_lpips \
     --ema \
     --ema_decay 0.999 \
