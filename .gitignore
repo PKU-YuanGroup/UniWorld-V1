@@ -1,0 +1,7 @@
+**/__pycache__
+**/results
+**/wandb
+**/build
+**/cache_dir
+**/sync.sh
+**/test*
