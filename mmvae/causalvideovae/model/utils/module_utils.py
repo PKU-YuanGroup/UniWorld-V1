@@ -3,7 +3,7 @@ import torch
 import gc
 
 Module = str
-MODULES_BASE = "causalvideovae.model.modules."
+MODULES_BASE = "mmvae.causalvideovae.model.modules."
 def resolve_str_to_obj(str_val, append=True):
     if append:
         str_val = MODULES_BASE + str_val

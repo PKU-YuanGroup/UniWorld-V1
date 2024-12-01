@@ -4,8 +4,7 @@ import torch
 import sys
 from torch.utils.data import DataLoader, Subset
 import os
-sys.path.append(".")
-from causalvideovae.model import *
+from mmvae.causalvideovae.model import *
 from accelerate import Accelerator
 import numpy as np
 from torchvision.datasets import ImageFolder
@@ -17,6 +16,13 @@ import lpips
 import cv2
 from torch.utils.data import Dataset
 from einops import rearrange
+from diffusers.models import AutoencoderKL
+
+def total_params(model):
+    total_params = sum(p.numel() for p in model.parameters())
+    total_params_in_millions = total_params / 1e6
+    return int(total_params_in_millions)
+
 
 def center_crop_arr(pil_image, image_size):
     """
@@ -139,8 +145,12 @@ def main(args: argparse.Namespace):
     
 
     device = args.device
-    model_cls = ModelRegistry.get_model(args.model_name)
-    vae = model_cls.from_pretrained(args.from_pretrained)
+    if args.hf_model is None:
+        model_cls = ModelRegistry.get_model(args.model_name)
+        vae = model_cls.from_pretrained(args.from_pretrained)
+    else:
+        vae = AutoencoderKL.from_pretrained(args.hf_model)
+    
     vae = vae.to(device).to(data_type)
     if args.enable_tiling:
         vae.enable_tiling()
@@ -174,8 +184,15 @@ def main(args: argparse.Namespace):
         labels = labels.reshape(-1, 1)
         x = x.to(device=device, dtype=data_type)  # b c h w
         
-        z, z_t = vae.encode(x=x, input_ids=labels).latent_dist.sample()
-        image_recon, text_recon = vae.decode(z, z_t).sample
+        if args.hf_model is not None:
+            z = vae.encode(x).latent_dist.sample()
+        else:
+            z, z_t = vae.encode(x=x, input_ids=labels).latent_dist.sample()
+
+        if args.hf_model is not None:
+            image_recon = vae.decode(z).sample
+        else:
+            image_recon, text_recon = vae.decode(z, z_t).sample
         if args.output_save_dir is not None:
             for i in image_recon:
                 save_path = f'{args.output_save_dir}/rank{accelerator.process_index}_{cnt}.jpg'
@@ -209,6 +226,8 @@ def main(args: argparse.Namespace):
             f'psnr: {psnr_results_list.mean().item()}\n'
             f'lpips: {lpips_results_list.mean().item()}\n'
             f'ssim: {ssim_results_list.mean().item()}\n'
+            f'enc param: {total_params(vae.encoder)}M\n'
+            f'dec param: {total_params(vae.decoder)}M\n'
             )
         
 
@@ -225,6 +244,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, default=None, help="")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--output_save_dir", type=str, default=None)
+    parser.add_argument("--hf_model", type=str, default=None)
 
     args = parser.parse_args()
     main(args)

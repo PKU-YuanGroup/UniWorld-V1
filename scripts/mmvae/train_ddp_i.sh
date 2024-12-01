@@ -17,20 +17,20 @@ export MKL_NUM_THREADS=1
 # conda activate fl
 # 953e958793b218efb850fa194e85843e2c3bd88b
 
+export CUDA_VISIBLE_DEVICES=0,1
 EXP_NAME=debug_vae
 torchrun \
-    --nnodes=1 --nproc_per_node=8 \
+    --nnodes=1 --nproc_per_node=2 \
     --master_addr=localhost \
-    --master_port=12135 \
-    train_ddp.py \
+    --master_port=12137 \
+    mmvae/train_ddp.py \
     --exp_name ${EXP_NAME} \
-    --video_path /storage/dataset/imagenet/imagenet/train \
-    --eval_video_path /storage/dataset/val2017/ \
+    --image_path /storage/dataset/imagenet/imagenet/train \
+    --eval_image_path /storage/dataset/imagenet/imagenet/val/ \
     --model_name MMVAE \
-    --model_config /storage/lb/DiT/WF-VAE/config_t.json \
+    --model_config /storage/lb/FlowWorld/configs/mmvae/config_i.json \
     --resolution 256 \
-    --num_frames 1 \
-    --batch_size 8 \
+    --batch_size 16 \
     --lr 0.00001 \
     --epochs 4 \
     --disc_start 50000 \
@@ -38,16 +38,13 @@ torchrun \
     --save_ckpt_step 5000 \
     --eval_steps 1000 \
     --eval_batch_size 1 \
-    --eval_num_frames 33 \
-    --eval_sample_rate 1 \
     --eval_subset_size 5000 \
     --eval_lpips \
     --ema \
     --ema_decay 0.999 \
-    --perceptual_weight 0.1 \
+    --perceptual_weight 1.0 \
     --loss_type l1 \
-    --sample_rate 1 \
     --disc_cls causalvideovae.model.losses.LPIPSWithDiscriminator2D \
     --wavelet_loss \
     --wavelet_weight 0.1 \
-    --train_text 
+    --train_image 

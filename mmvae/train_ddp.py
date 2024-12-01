@@ -75,7 +75,9 @@ def total_params(model):
     return int(total_params_in_millions)
 
 def get_exp_name(args):
-    return f"{args.exp_name}-lr{args.lr:.2e}-bs{args.batch_size}-rs{args.resolution}-sr{args.sample_rate}-fr{args.num_frames}"
+    return f"{args.exp_name}-lr{args.lr:.2e}-bs{args.batch_size}-rs{args.resolution}-"\
+            f"i{'1' if args.train_image else '0'}-t{'1' if args.train_text else '0'}-clip{'1' if args.clip_loss else '0'}-"\
+            f"lpips{args.perceptual_weight}"
 
 def set_train(modules):
     for module in modules:
@@ -130,6 +132,13 @@ def save_checkpoint(
     )
     return filepath
 
+def calculate_psnr(video_recon, inputs, device=None):
+    mse = torch.mean(torch.square(inputs - video_recon), dim=list(range(video_recon.ndim))[1:])
+    psnr = 20 * torch.log10(1 / torch.sqrt(mse))
+    psnr = psnr.mean().detach()
+    if psnr == torch.inf:
+        return 100
+    return psnr.cpu().item()
 
 def valid(global_rank, rank, model, val_dataloader, precision, args):
     if args.train_image and args.eval_lpips:
@@ -210,9 +219,9 @@ def valid(global_rank, rank, model, val_dataloader, precision, args):
                         num_video_log -= 1
 
                 # Calculate PSNR
-                mse = torch.mean(torch.square((torch.clip(inputs, -1, 1)+1)*2 - (torch.clip(video_recon, -1, 1)+1)*2), dim=list(range(video_recon.ndim))[1:])
-                psnr = 20 * torch.log10(1 / torch.sqrt(mse))
-                psnr = psnr.mean().detach().cpu().item()
+                psnr = calculate_psnr(
+                    (torch.clip(inputs, -1, 1)+1)/2, (torch.clip(video_recon, -1, 1)+1)/2
+                    )
 
                 # Calculate LPIPS
                 if args.eval_lpips:
@@ -387,7 +396,7 @@ def train(args):
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
     ])
-    dataset = ImageFolder(args.video_path, transform=transform)
+    dataset = ImageFolder(args.image_path, transform=transform)
 
     ddp_sampler = CustomDistributedSampler(dataset)
     dataloader = DataLoader(
@@ -400,7 +409,7 @@ def train(args):
 
 
     
-    val_dataset = ImageFolder(args.eval_video_path, transform=transform)
+    val_dataset = ImageFolder(args.eval_image_path, transform=transform)
     indices = range(args.eval_subset_size)
     val_dataset = Subset(val_dataset, indices=indices)
     val_sampler = CustomDistributedSampler(val_dataset)
@@ -787,10 +796,8 @@ def main():
     parser.add_argument("--clip_grad_norm", type=float, default=1e5, help="")
 
     # Data
-    parser.add_argument("--video_path", type=str, default=None, help="")
-    parser.add_argument("--num_frames", type=int, default=17, help="")
+    parser.add_argument("--image_path", type=str, default=None, help="")
     parser.add_argument("--resolution", type=int, default=256, help="")
-    parser.add_argument("--sample_rate", type=int, default=2, help="")
     parser.add_argument("--dynamic_sample", action="store_true", help="")
     # Generator model
     parser.add_argument("--ignore_mismatched_sizes", action="store_true", help="")
@@ -831,10 +838,8 @@ def main():
 
     # Validation
     parser.add_argument("--eval_steps", type=int, default=1000, help="")
-    parser.add_argument("--eval_video_path", type=str, default=None, help="")
-    parser.add_argument("--eval_num_frames", type=int, default=17, help="")
+    parser.add_argument("--eval_image_path", type=str, default=None, help="")
     parser.add_argument("--eval_resolution", type=int, default=256, help="")
-    parser.add_argument("--eval_sample_rate", type=int, default=1, help="")
     parser.add_argument("--eval_batch_size", type=int, default=8, help="")
     parser.add_argument("--eval_subset_size", type=int, default=100, help="")
     parser.add_argument("--eval_num_video_log", type=int, default=2, help="")
