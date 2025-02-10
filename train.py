@@ -171,6 +171,7 @@ def do_train(train_config, accelerator):
             if use_diffusion:
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
+                loss = loss_dict["loss"].mean()
             else:
                 loss_dict = transport.training_losses(model, x, model_kwargs)
                 

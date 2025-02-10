@@ -25,7 +25,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/baseline.yaml
+    --config configs/diff_xl_100kx1024.yaml
 
 # inference
 cd /data/FlowWorld
@@ -37,14 +37,15 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/debug.yaml \
+    --config configs/diff_400kx256.yaml \
     --demo 
 
 
 # evaluator
 conda create -n dit_eval python=3.10 -y
 conda activate dit_eval
-pip install tensorflow==2.15.0 scipy requests tqdm
+# cuda12.2
+pip install tensorflow==2.15.0 scipy requests tqdm numpy==1.23.5
 pip install nvidia-pyindex
 pip install nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12
 
@@ -52,4 +53,4 @@ cd /data/FlowWorld
 conda activate dit_eval
 python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
-    /data/logs/fastdit/debug/dit-xl-2-ckpt-dit-xl-2-256x256-25-diffusion.npz
+    /data/logs/fastdit/diffusion_400kx256/dit-xl-2-ckpt-dit-xl-2-256x256-250-diffusion.npz
