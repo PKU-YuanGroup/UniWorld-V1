@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "models"
-version = "1.5.0"
+version = "1.0"
 readme = "README.md"
 requires-python = ">=3.8"
 classifiers = [
@@ -16,9 +16,8 @@ dependencies = [
     "einops==0.7.0", "matplotlib==3.7.5", "numpy==1.24.4", "ipdb==0.13.13", 
     "omegaconf==2.1.1", "pandas==2.0.3", "pillow==10.2.0", "torchdiffeq==0.2.3", 
     "PyYAML==6.0.2", "timm==0.9.16", "wandb==0.16.3", "tensorboard==2.14.0", 
-    "torch==2.4.1", "torchvision==0.19.1", "deepspeed==0.15.1", "protobuf==3.20.0"
+    "torch==2.6.0", "torchvision==0.21.0", "deepspeed==0.15.1", "protobuf==3.20.0"
 ]
-
 
 [project.urls]
 "Homepage" = "https://github.com/PKU-YuanGroup/Open-Sora-Plan"

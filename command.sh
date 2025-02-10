@@ -1,9 +1,12 @@
+tmux new -d -s clash "cd /data/clash && mkdir -p ~/.config/clash && cp Country.mmdb ~/.config/clash && ./clash -f 1724121750205.yml"
 
-
-
+conda create -n dit python=3.10 -y
+pip install -e .
 
 # extract_feature
-torchrun --nproc_per_node 8 --master_port 29502 -m extract_feature \
+cd /data/FlowWorld
+conda activate dit
+torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_feature \
     --data_path /mnt/data/lb/ImageNet-1K/train \
     --data_split imagenet_train \
     --output_path /mnt/data/lb/offline_vae_512 \
@@ -12,15 +15,9 @@ torchrun --nproc_per_node 8 --master_port 29502 -m extract_feature \
     --batch_size 20 \
     --num_workers 16 
 
-
-
-
-
-
-tmux new -d -s clash "cd /storage/clash && mkdir -p ~/.config/clash && cp Country.mmdb ~/.config/clash && ./clash -f 1730517458971.yml"
-
-conda activate dit_lb
-cd /storage/lb/LightningDiT
+# train
+cd /data/FlowWorld
+conda activate dit
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1235 \
@@ -28,13 +25,11 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/baseline___.yaml
+    --config configs/baseline.yaml
 
-
-
-
-conda activate dit_lb
-cd /storage/lb/LightningDiT
+# inference
+cd /data/FlowWorld
+conda activate dit
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1235 \
@@ -42,78 +37,19 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/xt_8_learn.yaml \
-    --demo
+    --config configs/debug.yaml \
+    --demo 
 
 
-conda activate llamageneval
+# evaluator
+conda create -n dit_eval python=3.10 -y
+conda activate dit_eval
+pip install tensorflow==2.15.0 scipy requests tqdm
+pip install nvidia-pyindex
+pip install nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12
+
+cd /data/FlowWorld
+conda activate dit_eval
 python tools/evaluator.py \
-    /storage/lb/datasets/VIRTUAL_imagenet256_labeled.npz \
-    ../logs/fastdit/100kx1024_lrx2/lightningdit-xl-2-ckpt-0100000-250.npz
-
-
-
-
-
-
-
-accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1235 \
-    --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
-    inference.py \
-    --config configs/xt_4_learn.yaml 
-
-
-accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1235 \
-    --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
-    inference.py \
-    --config configs/xt_12.yaml 
-
-
-accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1235 \
-    --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
-    inference.py \
-    --config configs/xt_12_learn.yaml 
-
-
-accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1235 \
-    --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
-    inference.py \
-    --config configs/xt_16.yaml 
-
-
-accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1235 \
-    --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
-    inference.py \
-    --config configs/xt_20_learn.yaml 
-
-
-accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1235 \
-    --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
-    inference.py \
-    --config configs/xt_24.yaml 
-
-
+    /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
+    /data/logs/fastdit/debug/dit-xl-2-ckpt-dit-xl-2-256x256-25-diffusion.npz

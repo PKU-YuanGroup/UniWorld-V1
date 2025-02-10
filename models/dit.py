@@ -1,21 +1,23 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 # --------------------------------------------------------
 # References:
-# GLIDE: https://github.com/openai/glide-text2im
-# MAE: https://github.com/facebookresearch/mae/blob/main/models_mae.py
+# DiT: https://github.com/facebookresearch/DiT
+# LightningDiT: https://github.com/hustvl/LightningDiT
 # --------------------------------------------------------
+
+import os
+import math
+import numpy as np
 
 import torch
 import torch.nn as nn
-import numpy as np
-import math
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
 from timm.models.vision_transformer import PatchEmbed, Mlp
+from models.swiglu_ffn import SwiGLUFFN 
+from models.pos_embed import VisionRotaryEmbeddingFast
 from models.rmsnorm import RMSNorm
 
 @torch.compile
@@ -24,7 +26,7 @@ def modulate(x, shift, scale):
 
 class Attention(nn.Module):
     """
-    Attention module of LightningDiT.
+    Attention module of DiT.
     """
     def __init__(
         self,
@@ -83,46 +85,48 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
-#################################################################################
-#               Embedding Layers for Timesteps and Class Labels                 #
-#################################################################################
 
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
+    Same as DiT.
     """
-    def __init__(self, hidden_size, frequency_embedding_size=256):
+    def __init__(self, hidden_size: int, frequency_embedding_size: int = 256) -> None:
         super().__init__()
+        self.frequency_embedding_size = frequency_embedding_size
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
             nn.Linear(hidden_size, hidden_size, bias=True),
         )
-        self.frequency_embedding_size = frequency_embedding_size
 
     @staticmethod
-    def timestep_embedding(t, dim, max_period=10000):
+    def timestep_embedding(t: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
         """
         Create sinusoidal timestep embeddings.
-        :param t: a 1-D Tensor of N indices, one per batch element.
-                          These may be fractional.
-        :param dim: the dimension of the output.
-        :param max_period: controls the minimum frequency of the embeddings.
-        :return: an (N, D) Tensor of positional embeddings.
+        Args:
+            t: A 1-D Tensor of N indices, one per batch element. These may be fractional.
+            dim: The dimension of the output.
+            max_period: Controls the minimum frequency of the embeddings.
+        Returns:
+            An (N, D) Tensor of positional embeddings.
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
         freqs = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
         ).to(device=t.device)
+        
         args = t[:, None].float() * freqs[None]
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+            
         return embedding
     
     @torch.compile
-    def forward(self, t):
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
         return t_emb
@@ -131,6 +135,7 @@ class TimestepEmbedder(nn.Module):
 class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
+    Same as DiT.
     """
     def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
@@ -158,42 +163,107 @@ class LabelEmbedder(nn.Module):
         embeddings = self.embedding_table(labels)
         return embeddings
 
+class Router(nn.Module):
+    def __init__(self, dim, router):
+        super().__init__()
+        self.capacity = router['capacity']
+        self.gate_mode = router['gate_mode']
+        self.aggregate_token = router['aggregate_token']
+        self.sort_topk = router['sort_topk']
+        self.use_gate = router['use_gate']
+        self.dim = dim
+        self.linear = nn.Linear(dim, dim)
 
-#################################################################################
-#                                 Core DiT Model                                #
-#################################################################################
+    def forward(self, x, c=None):
+        logit = self.linear(x)
+        if self.aggregate_token:
+            score = torch.mean(logit, dim=1, keepdim=True).softmax(dim=-1).repeat(1, x.shape[1], 1)
+        else:
+            score = logit.softmax(dim=-1)
+        _, topk_idx = torch.topk(score, k=int(self.dim*self.capacity), dim=-1, sorted=False)
+        if self.sort_topk:
+            topk_idx, _ = torch.sort(topk_idx, dim=-1)
+        x = torch.gather(x, dim=-1, index=topk_idx)
+        
+        if self.gate_mode == 'logit':
+            gate = logit
+        elif self.gate_mode == 'tanh':
+            gate = torch.tanh(logit)
+        elif self.gate_mode == 'tanhnorm':
+            gate = 0.2 * torch.tanh(logit)
+        elif self.gate_mode == 'score':
+            gate = score
+        else:
+            raise NotImplementedError(f'{self.gate_mode}')
+        # if gate.std().item() == 0:
+        #     print(
+        #     print(gate.max().item(), gate.min().item(), gate.mean().item(), gate.std().item(), ))
+        #     print('x', x)
+        #     print('logit', logit)
+        return x, gate, topk_idx
 
+    def restored(self, res, x, gate, topk_idx):
+        x = torch.zeros_like(res, dtype=res.dtype).scatter(-1, topk_idx, x.to(res.dtype))
+        mask = torch.ones_like(res, dtype=res.dtype).scatter(-1, topk_idx, 0.0)  # 0 on pick
+        if self.use_gate:
+            x = res + x * gate  # gate on pick_channel
+        else:
+            x = mask * res + (gate * 0.0).mean() + x
+        return x
+
+
+    
 class DiTBlock(nn.Module):
     """
-    A DiT block with adaptive layer norm zero (adaLN-Zero) conditioning.
+     DiT Block. We add features including: 
+    - ROPE
+    - QKNorm 
+    - RMSNorm
+    - SwiGLU
+    - No shift AdaLN.
+    Not all of them are used in the final model, please refer to the paper for more details.
     """
     def __init__(
-            self, 
-            hidden_size, 
-            num_heads, 
-            mlp_ratio=4.0, 
-            use_rmsnorm=False,
-            use_swiglu=False, 
-            use_qknorm=False, 
-            **block_kwargs
-            ):
+        self,
+        hidden_size,
+        num_heads,
+        mlp_ratio=4.0,
+        use_qknorm=False,
+        use_swiglu=False, 
+        use_rmsnorm=False,
+        use_router=False, 
+        router=None, 
+        **block_kwargs
+    ):
         super().__init__()
-        
+        self.use_router = use_router
+        self.router = Router(hidden_size, router) if use_router else None 
+        self.use_gate = router['use_gate'] if use_router else False
+
+        hidden_size = int(hidden_size * router['capacity']) if use_router else hidden_size
+        # Initialize normalization layers
         if not use_rmsnorm:
             self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
             self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         else:
             self.norm1 = RMSNorm(hidden_size)
             self.norm2 = RMSNorm(hidden_size)
-
+            
+        # Initialize attention layer
         self.attn = Attention(
-            hidden_size, num_heads=num_heads, qkv_bias=True, qk_norm=use_qknorm, **block_kwargs
-            )
+            hidden_size,
+            num_heads=num_heads,
+            qkv_bias=True,
+            qk_norm=use_qknorm,
+            use_rmsnorm=use_rmsnorm,
+            **block_kwargs
+        )
+        
+        # Initialize MLP layer
         mlp_hidden_dim = int(hidden_size * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
         if use_swiglu:
             # here we did not use SwiGLU from xformers because it is not compatible with torch.compile for now.
-            from models.swiglu_ffn import SwiGLUFFN 
             self.mlp = SwiGLUFFN(hidden_size, int(2/3 * mlp_hidden_dim))
         else:
             self.mlp = Mlp(
@@ -202,18 +272,28 @@ class DiTBlock(nn.Module):
                 act_layer=approx_gelu,
                 drop=0
             )
+            
+        # Initialize AdaLN modulation
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            nn.Linear(self.router.dim if use_router else hidden_size, 6 * hidden_size, bias=True)
         )
 
-    @torch.compile
-    def forward(self, x, c):
+    def forward_block(self, x, c, feat_rope=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa))
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
-
+    
+    @torch.compile
+    def forward(self, x, c, feat_rope=None):
+        if self.router is not None:
+            res = x
+            x, gate, topk_idx = self.router(x, c)
+        x = self.forward_block(x, c, feat_rope)
+        if self.router is not None:
+            x = self.router.restored(res, x, gate, topk_idx)
+        return x
 
 class FinalLayer(nn.Module):
     """
@@ -230,7 +310,6 @@ class FinalLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
-
     @torch.compile
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
@@ -247,28 +326,36 @@ class DiT(nn.Module):
         self,
         input_size=32,
         patch_size=2,
-        in_channels=4,
+        in_channels=32,
         hidden_size=1152,
         depth=28,
         num_heads=16,
         mlp_ratio=4.0,
         class_dropout_prob=0.1,
         num_classes=1000,
-        learn_sigma=True,
-        use_checkpoint=False,
-        use_rmsnorm=False,
-        use_swiglu=False, 
+        learn_sigma=False,
         use_qknorm=False,
+        use_swiglu=False,
+        use_rope=False,
+        use_rmsnorm=False,
+        use_checkpoint=False,
+        use_router=False, 
+        router=None, 
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
-        self.out_channels = in_channels * 2 if learn_sigma else in_channels
+        self.out_channels = in_channels if not learn_sigma else in_channels * 2
         self.patch_size = patch_size
         self.num_heads = num_heads
-        self.use_checkpoint = use_checkpoint
+        self.use_rope = use_rope
         self.use_rmsnorm = use_rmsnorm
-
+        self.depth = depth
+        # if use_router:
+        #     hidden_size = int(hidden_size / router['capacity'])
+        self.hidden_size = hidden_size
+        self.use_checkpoint = use_checkpoint
+        self.router_layer_idx = list(set(list(range(depth))) - set(router['general_layer'])) if use_router else []
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -276,12 +363,35 @@ class DiT(nn.Module):
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
+        # use rotary position encoding, borrow from EVA
+        if self.use_rope:
+            half_head_dim = hidden_size // num_heads // 2
+            hw_seq_len = input_size // patch_size
+            self.feat_rope = VisionRotaryEmbeddingFast(
+                dim=half_head_dim,
+                pt_seq_len=hw_seq_len,
+            )
+            if use_router:
+                assert half_head_dim % (half_head_dim * router['capacity']) == 0
+                self.feat_rope_router = VisionRotaryEmbeddingFast(
+                    dim=int(half_head_dim * router['capacity']),
+                    pt_seq_len=hw_seq_len,
+                )
+        else:
+            self.feat_rope = None
+            self.feat_rope_router = None
+
         self.blocks = nn.ModuleList([
             DiTBlock(
-                hidden_size, num_heads, mlp_ratio=mlp_ratio, 
-                use_rmsnorm=use_rmsnorm, use_swiglu=use_swiglu, 
+                hidden_size, 
+                num_heads, 
+                mlp_ratio=mlp_ratio, 
                 use_qknorm=use_qknorm, 
-                ) for _ in range(depth)
+                use_swiglu=use_swiglu, 
+                use_rmsnorm=use_rmsnorm,
+                use_router=use_router and i in self.router_layer_idx, 
+                router=router if use_router and i in self.router_layer_idx else None, 
+                ) for i in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
         self.initialize_weights()
@@ -337,28 +447,38 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t, y):
+    def forward(self, x, t=None, y=None):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
+        use_checkpoint: boolean to toggle checkpointing
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
-        for block in self.blocks:
-            
+        
+        for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
-                x = checkpoint(block, x, c, use_reentrant=True)
+                x = checkpoint(
+                    block, x, c, 
+                    self.feat_rope_router if idx in self.router_layer_idx else self.feat_rope, 
+                    use_reentrant=True
+                    )
             else:
-                x = block(x, c)                  # (N, T, D)
-        x = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
+                x = block(
+                    x, c, 
+                    self.feat_rope_router if idx in self.router_layer_idx else self.feat_rope
+                    )
+
+        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
+
         return x
 
-    def forward_with_cfg(self, x, t, y, cfg_scale):
+    def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=None, cfg_interval_start=None):
         """
         Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
         """
@@ -373,14 +493,14 @@ class DiT(nn.Module):
         eps, rest = model_out[:, :3], model_out[:, 3:]
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+        
+        if cfg_interval is True:
+            timestep = t[0]
+            if timestep < cfg_interval_start:
+                half_eps = cond_eps
+
         eps = torch.cat([half_eps, half_eps], dim=0)
         return torch.cat([eps, rest], dim=1)
-
-
-#################################################################################
-#                   Sine/Cosine Positional Embedding Functions                  #
-#################################################################################
-# https://github.com/facebookresearch/mae/blob/main/util/pos_embed.py
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_tokens=0):
     """
@@ -433,49 +553,78 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
 
 #################################################################################
-#                                   DiT Configs                                  #
+#                             DiT Configs                              #
 #################################################################################
+
+def DiT_XL_1(**kwargs):
+    return DiT(depth=28, hidden_size=1152, patch_size=1, num_heads=16, **kwargs)
 
 def DiT_XL_2(**kwargs):
     return DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
-def DiT_XL_4(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=4, num_heads=16, **kwargs)
-
-def DiT_XL_8(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=8, num_heads=16, **kwargs)
-
 def DiT_L_2(**kwargs):
     return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
 
-def DiT_L_4(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=4, num_heads=16, **kwargs)
-
-def DiT_L_8(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=8, num_heads=16, **kwargs)
+def DiT_B_1(**kwargs):
+    return DiT(depth=12, hidden_size=768, patch_size=1, num_heads=12, **kwargs)
 
 def DiT_B_2(**kwargs):
     return DiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
 
-def DiT_B_4(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=4, num_heads=12, **kwargs)
+def DiT_1p0B_1(**kwargs):
+    return DiT(depth=24, hidden_size=1536, patch_size=1, num_heads=24, **kwargs)
 
-def DiT_B_8(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=8, num_heads=12, **kwargs)
+def DiT_1p0B_2(**kwargs):
+    return DiT(depth=24, hidden_size=1536, patch_size=2, num_heads=24, **kwargs)
 
-def DiT_S_2(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+def DiT_1p6B_1(**kwargs):
+    return DiT(depth=28, hidden_size=1792, patch_size=1, num_heads=28, **kwargs)
 
-def DiT_S_4(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=4, num_heads=6, **kwargs)
-
-def DiT_S_8(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
-
+def DiT_1p6B_2(**kwargs):
+    return DiT(depth=28, hidden_size=1792, patch_size=2, num_heads=28, **kwargs)
 
 DiT_models = {
-    'DiT-XL/2': DiT_XL_2,  'DiT-XL/4': DiT_XL_4,  'DiT-XL/8': DiT_XL_8,
-    'DiT-L/2':  DiT_L_2,   'DiT-L/4':  DiT_L_4,   'DiT-L/8':  DiT_L_8,
-    'DiT-B/2':  DiT_B_2,   'DiT-B/4':  DiT_B_4,   'DiT-B/8':  DiT_B_8,
-    'DiT-S/2':  DiT_S_2,   'DiT-S/4':  DiT_S_4,   'DiT-S/8':  DiT_S_8,
+    'DiT-B/1': DiT_B_1, 'DiT-B/2': DiT_B_2,
+    'DiT-L/2': DiT_L_2,
+    'DiT-XL/1': DiT_XL_1, 'DiT-XL/2': DiT_XL_2,
+    'DiT-1p0B/1': DiT_1p0B_1, 'DiT-1p0B/2': DiT_1p0B_2,
+    'DiT-1p6B/1': DiT_1p6B_1, 'DiT-1p6B/2': DiT_1p6B_2,
 }
+
+if __name__ == '__main__':
+    import yaml
+
+    config_path = 'configs/baseline.yaml'
+    with open(config_path, "r") as f:
+        train_config = yaml.safe_load(f)
+    # Create model:
+    if 'downsample_ratio' in train_config['vae']:
+        downsample_ratio = train_config['vae']['downsample_ratio']
+    else:
+        downsample_ratio = 8
+    assert train_config['data']['image_size'] % downsample_ratio == 0, "Image size must be divisible by 8 (for the VAE encoder)."
+    latent_size = train_config['data']['image_size'] // downsample_ratio
+    in_channels = train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4
+    model = DiT_models[train_config['model']['model_type']](
+        input_size=latent_size,
+        num_classes=train_config['data']['num_classes'],
+        use_qknorm=train_config['model']['use_qknorm'],
+        use_swiglu=train_config['model']['use_swiglu'] if 'use_swiglu' in train_config['model'] else False,
+        use_rope=train_config['model']['use_rope'] if 'use_rope' in train_config['model'] else False,
+        use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
+        in_channels=in_channels, 
+        use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
+        use_router=train_config['model']['use_router'] if 'use_router' in train_config['model'] else False,
+        router=train_config['model']['router'] if 'router' in train_config['model'] else None,
+    ).cuda()
+
+    print(model)
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+
+    bsz = 2
+    x = torch.rand(bsz, in_channels, latent_size, latent_size).cuda()
+    t = torch.rand(bsz).cuda()
+    y = torch.randint(0, 1000, (bsz, )).cuda()
+
+    logit = model(x, t, y)
+    print(logit.shape)

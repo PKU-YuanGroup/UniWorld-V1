@@ -1,15 +1,16 @@
-"""
-ImageNet Latent Dataset with safetensors.
-"""
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# LightningDiT: https://github.com/hustvl/LightningDiT
+# --------------------------------------------------------
 
 import os
 import numpy as np
 from glob import glob
 from tqdm import tqdm
-
 import torch
 from torch.utils.data import Dataset
-
 from safetensors import safe_open
 
 

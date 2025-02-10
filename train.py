@@ -1,11 +1,10 @@
-"""
-Training Codes of LightningDiT together with VA-VAE.
-It envolves advanced training methods, sampling methods, 
-architecture design methods, computation methods. We achieve
-state-of-the-art FID 1.35 on ImageNet 256x256.
-
-by Maple (Jingfeng Yao) from HUST-VL
-"""
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# DiT: https://github.com/facebookresearch/DiT
+# LightningDiT: https://github.com/hustvl/LightningDiT
+# --------------------------------------------------------
 import random
 import torch
 import torch.distributed as dist
@@ -13,11 +12,8 @@ import torch.backends.cuda
 import torch.backends.cudnn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from accelerate.utils import ProjectConfiguration
-import math
 import yaml
-import json
 import numpy as np
 import logging
 import os
@@ -26,17 +22,12 @@ from time import time
 from glob import glob
 from copy import deepcopy
 from collections import OrderedDict
-from PIL import Image
-from tqdm import tqdm
-
-from diffusers.models import AutoencoderKL
+# local imports
 from diffusion import create_diffusion
-from models.lightningdit import LightningDiT_models
-from transport import create_transport, Sampler
+from models.dit import DiT_models
+from transport import create_transport
 from accelerate import Accelerator
 from datasets.img_latent_dataset import ImgLatentDataset
-
-# torch.autograd.set_detect_anomaly(True)
 
 def get_grad_norm(model, norm_type=2):
     total_norm = 0.0
@@ -48,7 +39,7 @@ def get_grad_norm(model, norm_type=2):
 
 def do_train(train_config, accelerator):
     """
-    Trains a LightningDiT.
+    Trains a DiT.
     """
     # Setup accelerator:
     device = accelerator.device
@@ -71,7 +62,10 @@ def do_train(train_config, accelerator):
         downsample_ratio = 8
     assert train_config['data']['image_size'] % downsample_ratio == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = train_config['data']['image_size'] // downsample_ratio
-    model = LightningDiT_models[train_config['model']['model_type']](
+    use_diffusion = train_config['scheduler']['diffusion'] if 'diffusion' in train_config['scheduler'] else False
+    use_transport = train_config['scheduler']['use_transport'] if 'use_transport' in train_config['scheduler'] else False
+    assert (use_diffusion ^ use_transport), "use_diffusion and use_transport must be different (one True, one False)"
+    model = DiT_models[train_config['model']['model_type']](
         input_size=latent_size,
         num_classes=train_config['data']['num_classes'],
         use_qknorm=train_config['model']['use_qknorm'],
@@ -82,8 +76,7 @@ def do_train(train_config, accelerator):
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         use_router=train_config['model']['use_router'] if 'use_router' in train_config['model'] else False,
         router=train_config['model']['router'] if 'router' in train_config['model'] else None,
-        add_xt=train_config['model']['add_xt'] if 'add_xt' in train_config['model'] else None,
-        xt_gate=train_config['model']['xt_gate'] if 'xt_gate' in train_config['model'] else None,
+        learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
     )
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
@@ -91,17 +84,26 @@ def do_train(train_config, accelerator):
     requires_grad(ema, False)
     
     model = DDP(model.to(device), device_ids=[rank])
-    transport = create_transport(
-        train_config['transport']['path_type'],
-        train_config['transport']['prediction'],
-        train_config['transport']['loss_weight'],
-        train_config['transport']['train_eps'],
-        train_config['transport']['sample_eps'],
-        use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
-        use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
-    )  # default: velocity; 
+
+    if use_diffusion:
+        diffusion = create_diffusion(
+            timestep_respacing="", 
+            learn_sigma=train_config['diffusion']['learn_sigma'], 
+            diffusion_steps=train_config['diffusion']['diffusion_steps'], 
+            )  # default: 1000 steps, linear noise schedule
+    else:
+        transport = create_transport(
+            train_config['transport']['path_type'],
+            train_config['transport']['prediction'],
+            train_config['transport']['loss_weight'],
+            train_config['transport']['train_eps'],
+            train_config['transport']['sample_eps'],
+            use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
+            use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
+        )  # default: velocity; 
+
     if accelerator.is_main_process:
-        logger.info(f"LightningDiT Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+        logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
         logger.info(f"Optimizer: AdamW, lr={train_config['optimizer']['lr']}, beta2={train_config['optimizer']['beta2']}")
     opt = torch.optim.AdamW(model.parameters(), lr=train_config['optimizer']['lr'], weight_decay=0, betas=(0.9, train_config['optimizer']['beta2']))
     
@@ -164,16 +166,20 @@ def do_train(train_config, accelerator):
         for x, y in loader:
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)  
+
             model_kwargs = dict(y=y)
-            loss_dict = transport.training_losses(model, x, model_kwargs)
-            
-            if 'cos_loss' in loss_dict:
-                mse_loss = loss_dict["loss"].mean()
-                loss = loss_dict["cos_loss"].mean() + mse_loss
+            if use_diffusion:
+                t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
+                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
             else:
-                loss = loss_dict["loss"].mean()
+                loss_dict = transport.training_losses(model, x, model_kwargs)
+                
+                if 'cos_loss' in loss_dict:
+                    mse_loss = loss_dict["loss"].mean()
+                    loss = loss_dict["cos_loss"].mean() + mse_loss
+                else:
+                    loss = loss_dict["loss"].mean()
             opt.zero_grad()
-            # with torch.autograd.detect_anomaly():
             accelerator.backward(loss)
             if 'max_grad_norm' in train_config['optimizer']:
                 if accelerator.sync_gradients:

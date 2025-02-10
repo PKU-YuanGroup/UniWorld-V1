@@ -1,3 +1,9 @@
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# LightningDiT: https://github.com/hustvl/LightningDiT
+# --------------------------------------------------------
 import torch
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
@@ -9,7 +15,6 @@ import argparse
 import os
 from safetensors.torch import save_file
 from datetime import datetime
-from datasets.img_latent_dataset import ImgLatentDataset
 from diffusers.models import AutoencoderKL
 import os
 import torch
@@ -19,6 +24,7 @@ import numpy as np
 import torch.nn as nn
 from PIL import Image
 from torchvision import transforms
+from ..datasets.img_latent_dataset import ImgLatentDataset
 
 def center_crop_arr(pil_image, image_size):
     """
