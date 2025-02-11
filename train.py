@@ -74,8 +74,6 @@ def do_train(train_config, accelerator):
         use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
         in_channels=train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4,
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
-        use_router=train_config['model']['use_router'] if 'use_router' in train_config['model'] else False,
-        router=train_config['model']['router'] if 'router' in train_config['model'] else None,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
     )
 

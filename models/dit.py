@@ -162,56 +162,6 @@ class LabelEmbedder(nn.Module):
             labels = self.token_drop(labels, force_drop_ids)
         embeddings = self.embedding_table(labels)
         return embeddings
-
-class Router(nn.Module):
-    def __init__(self, dim, router):
-        super().__init__()
-        self.capacity = router['capacity']
-        self.gate_mode = router['gate_mode']
-        self.aggregate_token = router['aggregate_token']
-        self.sort_topk = router['sort_topk']
-        self.use_gate = router['use_gate']
-        self.dim = dim
-        self.linear = nn.Linear(dim, dim)
-
-    def forward(self, x, c=None):
-        logit = self.linear(x)
-        if self.aggregate_token:
-            score = torch.mean(logit, dim=1, keepdim=True).softmax(dim=-1).repeat(1, x.shape[1], 1)
-        else:
-            score = logit.softmax(dim=-1)
-        _, topk_idx = torch.topk(score, k=int(self.dim*self.capacity), dim=-1, sorted=False)
-        if self.sort_topk:
-            topk_idx, _ = torch.sort(topk_idx, dim=-1)
-        x = torch.gather(x, dim=-1, index=topk_idx)
-        
-        if self.gate_mode == 'logit':
-            gate = logit
-        elif self.gate_mode == 'tanh':
-            gate = torch.tanh(logit)
-        elif self.gate_mode == 'tanhnorm':
-            gate = 0.2 * torch.tanh(logit)
-        elif self.gate_mode == 'score':
-            gate = score
-        else:
-            raise NotImplementedError(f'{self.gate_mode}')
-        # if gate.std().item() == 0:
-        #     print(
-        #     print(gate.max().item(), gate.min().item(), gate.mean().item(), gate.std().item(), ))
-        #     print('x', x)
-        #     print('logit', logit)
-        return x, gate, topk_idx
-
-    def restored(self, res, x, gate, topk_idx):
-        x = torch.zeros_like(res, dtype=res.dtype).scatter(-1, topk_idx, x.to(res.dtype))
-        mask = torch.ones_like(res, dtype=res.dtype).scatter(-1, topk_idx, 0.0)  # 0 on pick
-        if self.use_gate:
-            x = res + x * gate  # gate on pick_channel
-        else:
-            x = mask * res + (gate * 0.0).mean() + x
-        return x
-
-
     
 class DiTBlock(nn.Module):
     """
@@ -231,16 +181,10 @@ class DiTBlock(nn.Module):
         use_qknorm=False,
         use_swiglu=False, 
         use_rmsnorm=False,
-        use_router=False, 
-        router=None, 
         **block_kwargs
     ):
         super().__init__()
-        self.use_router = use_router
-        self.router = Router(hidden_size, router) if use_router else None 
-        self.use_gate = router['use_gate'] if use_router else False
 
-        hidden_size = int(hidden_size * router['capacity']) if use_router else hidden_size
         # Initialize normalization layers
         if not use_rmsnorm:
             self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -276,23 +220,14 @@ class DiTBlock(nn.Module):
         # Initialize AdaLN modulation
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(self.router.dim if use_router else hidden_size, 6 * hidden_size, bias=True)
+            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
-
-    def forward_block(self, x, c, feat_rope=None):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
-        return x
     
     @torch.compile
     def forward(self, x, c, feat_rope=None):
-        if self.router is not None:
-            res = x
-            x, gate, topk_idx = self.router(x, c)
-        x = self.forward_block(x, c, feat_rope)
-        if self.router is not None:
-            x = self.router.restored(res, x, gate, topk_idx)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 class FinalLayer(nn.Module):
@@ -339,8 +274,6 @@ class DiT(nn.Module):
         use_rope=False,
         use_rmsnorm=False,
         use_checkpoint=False,
-        use_router=False, 
-        router=None, 
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -351,11 +284,8 @@ class DiT(nn.Module):
         self.use_rope = use_rope
         self.use_rmsnorm = use_rmsnorm
         self.depth = depth
-        # if use_router:
-        #     hidden_size = int(hidden_size / router['capacity'])
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
-        self.router_layer_idx = list(set(list(range(depth))) - set(router['general_layer'])) if use_router else []
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -371,15 +301,8 @@ class DiT(nn.Module):
                 dim=half_head_dim,
                 pt_seq_len=hw_seq_len,
             )
-            if use_router:
-                assert half_head_dim % (half_head_dim * router['capacity']) == 0
-                self.feat_rope_router = VisionRotaryEmbeddingFast(
-                    dim=int(half_head_dim * router['capacity']),
-                    pt_seq_len=hw_seq_len,
-                )
         else:
             self.feat_rope = None
-            self.feat_rope_router = None
 
         self.blocks = nn.ModuleList([
             DiTBlock(
@@ -389,8 +312,6 @@ class DiT(nn.Module):
                 use_qknorm=use_qknorm, 
                 use_swiglu=use_swiglu, 
                 use_rmsnorm=use_rmsnorm,
-                use_router=use_router and i in self.router_layer_idx, 
-                router=router if use_router and i in self.router_layer_idx else None, 
                 ) for i in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
@@ -462,16 +383,9 @@ class DiT(nn.Module):
         
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
-                x = checkpoint(
-                    block, x, c, 
-                    self.feat_rope_router if idx in self.router_layer_idx else self.feat_rope, 
-                    use_reentrant=True
-                    )
+                x = checkpoint(block, x, c, self.feat_rope, use_reentrant=True)
             else:
-                x = block(
-                    x, c, 
-                    self.feat_rope_router if idx in self.router_layer_idx else self.feat_rope
-                    )
+                x = block(x, c, self.feat_rope)
 
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
@@ -556,6 +470,9 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #                             DiT Configs                              #
 #################################################################################
 
+def DiT_S_2(**kwargs):
+    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+
 def DiT_XL_1(**kwargs):
     return DiT(depth=28, hidden_size=1152, patch_size=1, num_heads=16, **kwargs)
 
@@ -584,6 +501,7 @@ def DiT_1p6B_2(**kwargs):
     return DiT(depth=28, hidden_size=1792, patch_size=2, num_heads=28, **kwargs)
 
 DiT_models = {
+    'DiT-S/2':  DiT_S_2, 
     'DiT-B/1': DiT_B_1, 'DiT-B/2': DiT_B_2,
     'DiT-L/2': DiT_L_2,
     'DiT-XL/1': DiT_XL_1, 'DiT-XL/2': DiT_XL_2,
@@ -614,8 +532,6 @@ if __name__ == '__main__':
         use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
         in_channels=in_channels, 
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
-        use_router=train_config['model']['use_router'] if 'use_router' in train_config['model'] else False,
-        router=train_config['model']['router'] if 'router' in train_config['model'] else None,
     ).cuda()
 
     print(model)

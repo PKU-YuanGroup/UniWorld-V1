@@ -25,7 +25,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/diff_xl_100kx1024.yaml
+    --config configs/diff_s_100kx1024.yaml
 
 # inference
 cd /data/FlowWorld
@@ -37,7 +37,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/diff_400kx256.yaml \
+    --config configs/diff_s_400kx256.yaml \
     --demo 
 
 
@@ -53,4 +53,4 @@ cd /data/FlowWorld
 conda activate dit_eval
 python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
-    /data/logs/fastdit/diffusion_400kx256/dit-xl-2-ckpt-dit-xl-2-256x256-250-diffusion.npz
+    /data/logs/fastdit/diffusion_400kx256/dit-xl-2-ckpt-dit-xl-2-256x256-250-diffusion-interval100.00-cfg1.50.npz
