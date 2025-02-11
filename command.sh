@@ -25,7 +25,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/diff_s_100kx1024.yaml
+    --config configs/did_s_100kx1024_qf1x1_img0p5.yaml
 
 # inference
 cd /data/FlowWorld
@@ -37,7 +37,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/diff_s_400kx256.yaml \
+    --config configs/diff_xl_100kx1024.yaml \
     --demo 
 
 

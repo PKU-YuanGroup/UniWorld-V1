@@ -24,7 +24,7 @@ from copy import deepcopy
 from collections import OrderedDict
 # local imports
 from diffusion import create_diffusion
-from models.dit import DiT_models
+from models import Models
 from transport import create_transport
 from accelerate import Accelerator
 from datasets.img_latent_dataset import ImgLatentDataset
@@ -65,7 +65,7 @@ def do_train(train_config, accelerator):
     use_diffusion = train_config['scheduler']['diffusion'] if 'diffusion' in train_config['scheduler'] else False
     use_transport = train_config['scheduler']['use_transport'] if 'use_transport' in train_config['scheduler'] else False
     assert (use_diffusion ^ use_transport), "use_diffusion and use_transport must be different (one True, one False)"
-    model = DiT_models[train_config['model']['model_type']](
+    kwargs = dict(
         input_size=latent_size,
         num_classes=train_config['data']['num_classes'],
         use_qknorm=train_config['model']['use_qknorm'],
@@ -76,6 +76,9 @@ def do_train(train_config, accelerator):
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
     )
+    if 'qformer' in train_config['model']:
+        kwargs.update(dict(qformer=train_config['model']['qformer']))
+    model = Models[train_config['model']['model_type']](**kwargs)
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
 
@@ -165,7 +168,7 @@ def do_train(train_config, accelerator):
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)  
 
-            model_kwargs = dict(y=y)
+            model_kwargs = dict(y=y, clean_x=x)
             if use_diffusion:
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)

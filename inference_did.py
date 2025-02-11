@@ -188,14 +188,14 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     if demo_sample_mode:
         if accelerator.process_index == 0:
             images = []
-            for label in tqdm([207, 360, 387, 974, 88, 979, 417, 279], desc="Generating Demo Samples"):
+            for i in tqdm(range(8), desc="Generating Demo Samples"):
                 z = torch.randn(1, model.in_channels, latent_size, latent_size, device=device)
-                y = torch.tensor([label], device=device)
+                clean_x, label = dataset.__getitem__(i)
+                clean_x = clean_x.unsqueeze(0).to(device)
                 z = torch.cat([z, z], 0)
                 y_null = torch.tensor([1000] * 1, device=device)
-                y = torch.cat([y, y_null], 0)
-                model_kwargs = dict(y=y, cfg_scale=cfg_scale, cfg_interval=False, cfg_interval_start=cfg_interval_start)
-                model_fn = model.forward_with_cfg
+                model_kwargs = dict(y=y_null, clean_x=clean_x, cfg_scale=cfg_scale, cfg_interval=False, cfg_interval_start=cfg_interval_start)
+                model_fn = model.forward_with_cfg_with_img
                 if use_diffusion:
                     samples = sample_fn(model_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device)
                 else:
@@ -215,46 +215,9 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                 grid[i*h:(i+1)*h, j*w:(j+1)*w] = image
                 
             # Save the combined image
-            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_samples.png")
+            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_i2i_samples.png")
 
             return None
-    else:
-        for i in pbar:
-            # Sample inputs:
-            z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
-            y = torch.randint(0, train_config['data']['num_classes'], (n,), device=device)
-            
-            # Setup classifier-free guidance:
-            if using_cfg:
-                z = torch.cat([z, z], 0)
-                y_null = torch.tensor([1000] * n, device=device)
-                y = torch.cat([y, y_null], 0)
-                model_kwargs = dict(y=y, cfg_scale=cfg_scale, cfg_interval=True, cfg_interval_start=cfg_interval_start)
-                model_fn = model.forward_with_cfg
-            else:
-                model_kwargs = dict(y=y)
-                model_fn = model.forward
-
-            if use_diffusion:
-                samples = sample_fn(model_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device)
-            else:
-                samples = sample_fn(z, model_fn, **model_kwargs)[-1]
-            if using_cfg:
-                samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
-
-            samples = (samples * latent_std) / latent_multiplier + latent_mean
-            samples = vae.decode(samples).sample
-            samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-
-            # Save samples to disk as individual .png files
-            for i, sample in enumerate(samples):
-                index = i * accelerator.num_processes + accelerator.process_index + total
-                Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
-            total += global_batch_size
-            accelerator.wait_for_everyone()
-        if accelerator.process_index == 0:
-            create_npz_from_sample_folder(sample_folder_dir, train_config['sample']['fid_num'])
-
     return sample_folder_dir
 
 # some utils

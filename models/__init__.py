@@ -5,3 +5,8 @@
 # DiT: https://github.com/facebookresearch/DiT
 # LightningDiT: https://github.com/hustvl/LightningDiT
 # --------------------------------------------------------
+from .did import DiD_models
+from .dit import DiT_models
+Models = {}
+Models.update(DiD_models)
+Models.update(DiT_models)
