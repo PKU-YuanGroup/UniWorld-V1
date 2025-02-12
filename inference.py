@@ -71,7 +71,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     else:
         png_files = [f for f in os.listdir(sample_folder_dir) if f.endswith('.png')]
         png_count = len(png_files)
-        if png_count > train_config['sample']['fid_num']:
+        if png_count > train_config['sample']['fid_num'] and not demo_sample_mode:
             if accelerator.process_index == 0:
                 print_with_prefix(f"Found {png_count} PNG files in {sample_folder_dir}, skip sampling.")
             return sample_folder_dir

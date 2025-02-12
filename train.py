@@ -104,6 +104,7 @@ def do_train(train_config, accelerator):
         )  # default: velocity; 
 
     if accelerator.is_main_process:
+        logger.info(f"Model: {model}")
         logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
         logger.info(f"Optimizer: AdamW, lr={train_config['optimizer']['lr']}, beta2={train_config['optimizer']['beta2']}")
     opt = torch.optim.AdamW(model.parameters(), lr=train_config['optimizer']['lr'], weight_decay=0, betas=(0.9, train_config['optimizer']['beta2']))

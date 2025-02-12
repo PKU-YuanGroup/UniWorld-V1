@@ -150,11 +150,10 @@ class LabelEmbedder(nn.Module):
             self.proj = nn.Conv2d(in_chans, hidden_size, kernel_size=patch_size, stride=patch_size, bias=True)
 
     @torch.compile
-    def forward(self, clean_x, labels, train, num_tokens=256):
+    def forward(self, clean_x, labels, train, B, num_tokens=256):
         """
-        imgs: (N, C, H, W)
+        clean_x: (N, C, H, W)
         """
-        B = clean_x.shape[0]
         if labels is not None:
             embeddings = self.embedding_table(labels).unsqueeze(1).expand(-1, num_tokens, -1)  # NLC
         else:
@@ -397,10 +396,9 @@ class DiD(nn.Module):
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
         t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(clean_x, y, self.training, num_tokens=x.shape[1])    # (N, D)
+        y = self.y_embedder(clean_x, y, self.training, B=x.shape[0], num_tokens=x.shape[1])    # (N, D)
         y = self.q_former(y)
         c = t + y                                # (N, D)
-        
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
                 x = checkpoint(block, x, c, self.feat_rope, use_reentrant=True)
@@ -419,7 +417,7 @@ class DiD(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y, clean_x)
+        model_out = self.forward(combined, t, clean_x, y)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
@@ -442,8 +440,9 @@ class DiD(nn.Module):
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
-        model_out = self.forward(half, t, clean_x=clean_x)
-        model_out_ = self.forward(half, t, y=y)
+        half_t = t[: len(x) // 2]
+        model_out = self.forward(half, half_t, clean_x=clean_x)
+        model_out_ = self.forward(half, half_t, y=y)
         model_out = torch.concat([model_out, model_out_], dim=0)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.

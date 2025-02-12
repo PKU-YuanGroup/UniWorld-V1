@@ -188,9 +188,11 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     if demo_sample_mode:
         if accelerator.process_index == 0:
             images = []
+            labels = []
             for i in tqdm(range(8), desc="Generating Demo Samples"):
                 z = torch.randn(1, model.in_channels, latent_size, latent_size, device=device)
                 clean_x, label = dataset.__getitem__(i)
+                labels.append(str(label.item()))
                 clean_x = clean_x.unsqueeze(0).to(device)
                 z = torch.cat([z, z], 0)
                 y_null = torch.tensor([1000] * 1, device=device)
@@ -200,22 +202,25 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                     samples = sample_fn(model_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device)
                 else:
                     samples = sample_fn(z, model_fn, **model_kwargs)[-1]
+                # Take first image from each batch and merge clean_x
+                samples = samples[:1]
+                samples = torch.concat([samples, clean_x], dim=0)
                 samples = (samples * latent_std) / latent_multiplier + latent_mean
-                samples = vae.decode(samples).sample
+                samples = vae.decode(samples).sample  
                 samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
                 images.append(samples)
-            # Combine 8 images into a 2x4 grid
+            # Combine 16 images into a 4x4 grid
             # Stack all images into a large numpy array
-            all_images = np.stack([img[0] for img in images])  # Take first image from each batch            
-            # Rearrange into 2x4 grid
+            all_images = np.concatenate(images)    
+            # Rearrange into 4x4 grid
             h, w = all_images.shape[1:3]
-            grid = np.zeros((2 * h, 4 * w, 3), dtype=np.uint8)
+            grid = np.zeros((4 * h, 4 * w, 3), dtype=np.uint8)
             for idx, image in enumerate(all_images):
                 i, j = divmod(idx, 4)  # Calculate position in 2x4 grid
                 grid[i*h:(i+1)*h, j*w:(j+1)*w] = image
                 
             # Save the combined image
-            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_i2i_samples.png")
+            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_i2i_samples_{'_'.join(labels)}.png")
 
             return None
     return sample_folder_dir

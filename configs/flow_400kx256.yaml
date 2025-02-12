@@ -75,4 +75,4 @@ sample:
   # recommend to use default settings
   per_proc_batch_size: 64
   fid_num: 50000
-  cfg_interval_start: 0.10
+  cfg_interval_start: 0.0

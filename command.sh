@@ -37,9 +37,21 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/diff_xl_100kx1024.yaml \
+    --config configs/did_s_100kx1024_qf1x1_img0p5.yaml \
     --demo 
 
+# inference
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1235 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    inference_did.py \
+    --config configs/did_s_100kx1024_qf1x1_img0p5.yaml \
+    --demo 
 
 # evaluator
 conda create -n dit_eval python=3.10 -y
@@ -53,4 +65,4 @@ cd /data/FlowWorld
 conda activate dit_eval
 python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
-    /data/logs/fastdit/diffusion_400kx256/dit-xl-2-ckpt-dit-xl-2-256x256-250-diffusion-interval100.00-cfg1.50.npz
+    /data/logs/moc/did_s_100kx1024_qf1x1_img0p0/did-s-2-ckpt-0100000-250-diffusion.npz
