@@ -7,6 +7,9 @@
 # --------------------------------------------------------
 import random
 import torch
+# the first flag below was False when we tested this script but True makes A100 training a lot faste
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 import torch.distributed as dist
 import torch.backends.cuda
 import torch.backends.cudnn
@@ -95,8 +98,8 @@ def do_train(train_config, accelerator):
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
     )
-    if 'qformer' in train_config['model']:
-        kwargs.update(dict(qformer=train_config['model']['qformer']))
+    if 'decoder' in train_config['model']:
+        kwargs.update(dict(decoder=train_config['model']['decoder']))
     model = Models[train_config['model']['model_type']](**kwargs)
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
@@ -110,25 +113,6 @@ def do_train(train_config, accelerator):
         if accelerator.is_main_process:
             logger.info(f"Loaded pretrained model from {train_config['train']['weight_init']}")
 
-    
-    if 'qformer' in train_config['model'] and 'meta_info' in train_config['model']['qformer']:
-        
-        # meta_info = torch.load(train_config['model']['qformer']['meta_info'])
-        # mean, std = meta_info['mean'], meta_info['std']
-        # generated_vectors = torch.stack(mean)
-        # with torch.no_grad():
-        #     model.y_embedder.embedding_table.weight.data[:-1].copy_(generated_vectors)
-
-        # from torch import nn
-        # with torch.no_grad():
-        #     nn.init.normal_(model.y_embedder.embedding_table.weight, mean=0.0, std=0.2)
-
-        model.y_embedder.embedding_table.train()
-        model.y_embedder.embedding_table.weight.requires_grad_(True)
-        if accelerator.is_main_process:
-            logger.info(f"Init model.y_embedder.embedding_table.weight from {train_config['model']['qformer']['meta_info']}")
-
-
     requires_grad(ema, False)
     train_module = train_config['train']['train_module'] if 'train_module' in train_config['train'] else False
     if train_module and not ('all' in train_module):
@@ -139,12 +123,7 @@ def do_train(train_config, accelerator):
                     param.requires_grad = True
                     break
     
-    model = DDP(model.to(device), device_ids=[rank])
-    freeze_null_label = train_config['train']['freeze_null_label'] if 'freeze_null_label' in train_config['train'] else False
-    if freeze_null_label:
-        label_embedding_mask = torch.ones_like(model.module.y_embedder.embedding_table.weight)
-        label_embedding_mask[-1:] = 0.0
-        label_embedding_mask = label_embedding_mask.to(dtype=torch.float32, device=device)
+    model = DDP(model.to(device), device_ids=[device])
 
     if use_diffusion:
         diffusion = create_diffusion(
@@ -255,8 +234,6 @@ def do_train(train_config, accelerator):
                     loss = loss_dict["loss"].mean()
             opt.zero_grad()
             accelerator.backward(loss)
-            if freeze_null_label:
-                model.module.module.y_embedder.embedding_table.weight.grad *= label_embedding_mask
             if 'max_grad_norm' in train_config['optimizer']:
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), train_config['optimizer']['max_grad_norm'])

@@ -25,17 +25,58 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/did_s_100kx1024_qf4x4_img1p0.yaml
+    --config configs/diff_s_1000kx1024.yaml
 
+cd /data/FlowWorld
 conda activate dit
 accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1234 \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
     train.py \
-    --config configs/ft/did_s_100kx1024_qf4x4_img1p0_train_all.yaml
+    --config configs/diff_l_1000kx1024_fp32_4node.yaml
+
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
+    --machine_rank 1 \
+    train.py \
+    --config configs/diff_l_1000kx1024_fp32_4node.yaml
+
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
+    --machine_rank 2 \
+    train.py \
+    --config configs/diff_l_1000kx1024_fp32_4node.yaml
+
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
+    --machine_rank 3 \
+    train.py \
+    --config configs/diff_l_1000kx1024_fp32_4node.yaml
+
+
+
+
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp2.yaml \
+    --machine_rank 0 \
+    train.py \
+    --config configs/diff_b_1000kx1024_fp32_2node.yaml
+
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp2.yaml \
+    --machine_rank 1 \
+    train.py \
+    --config configs/diff_b_1000kx1024_fp32_2node.yaml
 
 # inference
 cd /data/FlowWorld

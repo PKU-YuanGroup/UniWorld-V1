@@ -311,8 +311,8 @@ if __name__ == "__main__":
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
     )
-    if 'qformer' in train_config['model']:
-        kwargs.update(dict(qformer=train_config['model']['qformer']))
+    if 'decoder' in train_config['model']:
+        kwargs.update(dict(decoder=train_config['model']['decoder']))
     model = Models[train_config['model']['model_type']](**kwargs)
 
     # naive sample
