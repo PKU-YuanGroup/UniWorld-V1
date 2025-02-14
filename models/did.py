@@ -300,7 +300,12 @@ class DiD(nn.Module):
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob, in_channels, patch_size, qformer['img_token_prob'])
-        self.q_former = QFormer(qformer['num_layers'], qformer['num_queries'], hidden_size, num_heads, mlp_ratio, qkv_bias=True, use_qknorm=True)
+        self.q_former = QFormer(
+            qformer['num_layers'], qformer['num_queries'], 
+            qformer['zero_qformer'] if 'zero_qformer' in qformer else False, 
+            hidden_size, num_heads, mlp_ratio, qkv_bias=True, use_qknorm=True
+            )
+        
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
@@ -354,6 +359,7 @@ class DiD(nn.Module):
             # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
             w = self.y_embedder.proj.weight.data
             nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+            # nn.init.normal_(self.y_embedder.proj.weight, std=0.12)
             nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Initialize timestep embedding MLP:
@@ -555,8 +561,10 @@ DiD_models = {
 
 if __name__ == '__main__':
     import yaml
+    from datasets.img_latent_dataset import ImgLatentDataset
 
-    config_path = 'configs/did_s_100kx1024_qf1x1_img0p5.yaml'
+    # config_path = 'configs/did_s_100kx1024_qf1x1_img1p0.yaml'
+    config_path = 'configs/did_s_100kx1024_qf1x1_img0p0_uncond.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     # Create model:
@@ -567,6 +575,7 @@ if __name__ == '__main__':
     assert train_config['data']['image_size'] % downsample_ratio == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = train_config['data']['image_size'] // downsample_ratio
     in_channels = train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4
+    use_diffusion = train_config['scheduler']['diffusion'] if 'diffusion' in train_config['scheduler'] else False
     model = DiD_models[train_config['model']['model_type']](
         input_size=latent_size,
         num_classes=train_config['data']['num_classes'],
@@ -577,15 +586,67 @@ if __name__ == '__main__':
         in_channels=in_channels, 
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         qformer=train_config['model']['qformer'] if 'qformer' in train_config['model'] else None,
+        learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
     ).cuda()
-    model.train()
+    checkpoint = torch.load(train_config['ckpt_path'], map_location=lambda storage, loc: storage)
+    # remove the prefix 'module.' from the keys
+    checkpoint['model'] = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}
+    # import ipdb;ipdb.set_trace()
+    model.load_state_dict(checkpoint['model'])
+
+    training = True
+    if training:
+        model.train()
+    else:
+        model.eval()
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
-    bsz = 4
-    x = torch.rand(bsz, in_channels, latent_size, latent_size).cuda()
-    t = torch.rand(bsz).cuda()
-    y = torch.randint(0, 1000, (bsz, )).cuda()
 
+    # latent_norm = train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False
+    # dataset = ImgLatentDataset(
+    #     data_dir=train_config['data']['data_path'],
+    #     latent_norm=latent_norm,
+    #     latent_multiplier=train_config['data']['latent_multiplier'] if 'latent_multiplier' in train_config['data'] else 0.18215,
+    # )
+    # clean_x, y = dataset.__getitem__(0)
+    # clean_x = clean_x.unsqueeze(0).cuda()
+    # bsz = 1
+    # x = torch.randn(bsz, in_channels, latent_size, latent_size).cuda()
+    # if use_diffusion:
+    #     # t = torch.randint(0, 1000, (bsz, )).cuda()
+    #     t = torch.randint(999, 1000, (bsz, )).cuda()
+    # else:
+    #     t = torch.rand(bsz).cuda()
+    # y = torch.randint(1000, 1001, (bsz, )).cuda()
+    # logit = model.q_former(model.y_embedder(clean_x, y, training, B=bsz, num_tokens=256))    # (N, D)
+    # print('last ckpt of self-condition pretrain, use self-condition')
+    # print(logit.mean().item(), logit.std().item(), logit.max().item(), logit.min().item())
+    # training = False
+    # model.eval()
+    # y = torch.randint(0, 1, (bsz, )).cuda()
+    # logit = model.q_former(model.y_embedder(None, y, training, B=bsz, num_tokens=256))    # (N, D)
+    # print('last ckpt of self-condition pretrain, use label (0)')
+    # print(logit.mean().item(), logit.std().item(), logit.max().item(), logit.min().item())
+
+
+    # bsz = 1
+    # x = torch.randn(bsz, in_channels, latent_size, latent_size).cuda()
+    # if use_diffusion:
+    #     # t = torch.randint(0, 1000, (bsz, )).cuda()
+    #     t = torch.randint(999, 1000, (bsz, )).cuda()
+    # else:
+    #     t = torch.rand(bsz).cuda()
+    # y = torch.randint(1000, 1001, (bsz, )).cuda()
+    # logit = model.q_former(model.y_embedder(None, y, training, B=bsz, num_tokens=256))    # (N, D)
+    # print('last ckpt of un-condition pretrain, use null-label (1000)')
+    # print(logit.mean().item(), logit.std().item(), logit.max().item(), logit.min().item())
+    
+    # y = torch.randint(0, 1, (bsz, )).cuda()
+    # logit = model.q_former(model.y_embedder(None, y, training, B=bsz, num_tokens=256))    # (N, D)
+    # print('last ckpt of un-condition pretrain, use label (0)')
+    # print(logit.mean().item(), logit.std().item(), logit.max().item(), logit.min().item())
+
+    import ipdb;ipdb.set_trace()
     logit = model(x, clean_x=x, t=t, y=y)
     print(logit.shape)

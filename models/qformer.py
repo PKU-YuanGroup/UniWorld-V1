@@ -4,7 +4,7 @@ from torch import nn
 import torch.nn.functional as F
     
 class QFormer(nn.Module):
-    def __init__(self, num_layers, num_queries, embed_dim, num_heads, mlp_ratio, qkv_bias=True, use_qknorm=True):
+    def __init__(self, num_layers, num_queries, zero_qformer, embed_dim, num_heads, mlp_ratio, qkv_bias=True, use_qknorm=True):
         super().__init__()
         self.num_queries = num_queries
         self.query_embed = nn.Parameter(torch.randn(1, num_queries, embed_dim))
@@ -12,11 +12,19 @@ class QFormer(nn.Module):
             Block(embed_dim, num_heads, mlp_ratio, qkv_bias, qk_norm=use_qknorm)
             for _ in range(num_layers)
         ])
+        self.zero_qformer = zero_qformer
+
     @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size = x.shape[0]
         queries = self.query_embed.expand(batch_size, -1, -1)  # (batch_size, num_queries, embed_dim)
         x = torch.cat([queries, x], dim=1)
         for layer in self.layers:
-            x = layer(x)
-        return x[:, :self.num_queries, :].mean(1)
+            if self.zero_qformer:
+                x = layer(x) * 0.0 + x
+            else:    
+                x = layer(x)
+        if self.zero_qformer:
+            return x[:, self.num_queries:, :].mean(1)
+        else:
+            return x[:, :self.num_queries, :].mean(1)

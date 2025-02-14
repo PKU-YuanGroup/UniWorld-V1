@@ -29,6 +29,25 @@ from transport import create_transport
 from accelerate import Accelerator
 from datasets.img_latent_dataset import ImgLatentDataset
 
+def load_weights_with_shape_check(model, checkpoint, rank=0):
+    model_state_dict = model.state_dict()
+    # check shape and load weights
+    for name, param in checkpoint['model'].items():
+        if name in model_state_dict:
+            if param.shape == model_state_dict[name].shape:
+                model_state_dict[name].copy_(param)
+            else:
+                if rank == 0:
+                    print(f"Skipping loading parameter '{name}' due to shape mismatch: "
+                        f"checkpoint shape {param.shape}, model shape {model_state_dict[name].shape}")
+        else:
+            if rank == 0:
+                print(f"Parameter '{name}' not found in model, skipping.")
+    # load state dict
+    model.load_state_dict(model_state_dict, strict=False)
+    
+    return model
+
 def get_grad_norm(model, norm_type=2):
     total_norm = 0.0
     for p in model.parameters():
@@ -81,10 +100,51 @@ def do_train(train_config, accelerator):
     model = Models[train_config['model']['model_type']](**kwargs)
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
+    # load pretrained model
+    if 'weight_init' in train_config['train']:
+        checkpoint = torch.load(train_config['train']['weight_init'], map_location=lambda storage, loc: storage)
+        # remove the prefix 'module.' from the keys
+        checkpoint['model'] = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}
+        model = load_weights_with_shape_check(model, checkpoint, rank=rank)
+        ema = load_weights_with_shape_check(ema, checkpoint, rank=rank)
+        if accelerator.is_main_process:
+            logger.info(f"Loaded pretrained model from {train_config['train']['weight_init']}")
+
+    
+    if 'qformer' in train_config['model'] and 'meta_info' in train_config['model']['qformer']:
+        
+        # meta_info = torch.load(train_config['model']['qformer']['meta_info'])
+        # mean, std = meta_info['mean'], meta_info['std']
+        # generated_vectors = torch.stack(mean)
+        # with torch.no_grad():
+        #     model.y_embedder.embedding_table.weight.data[:-1].copy_(generated_vectors)
+
+        # from torch import nn
+        # with torch.no_grad():
+        #     nn.init.normal_(model.y_embedder.embedding_table.weight, mean=0.0, std=0.2)
+
+        model.y_embedder.embedding_table.train()
+        model.y_embedder.embedding_table.weight.requires_grad_(True)
+        if accelerator.is_main_process:
+            logger.info(f"Init model.y_embedder.embedding_table.weight from {train_config['model']['qformer']['meta_info']}")
+
 
     requires_grad(ema, False)
+    train_module = train_config['train']['train_module'] if 'train_module' in train_config['train'] else False
+    if train_module and not ('all' in train_module):
+        model.requires_grad_(False)
+        for name, param in model.named_parameters():
+            for n in train_module:
+                if n in name:
+                    param.requires_grad = True
+                    break
     
     model = DDP(model.to(device), device_ids=[rank])
+    freeze_null_label = train_config['train']['freeze_null_label'] if 'freeze_null_label' in train_config['train'] else False
+    if freeze_null_label:
+        label_embedding_mask = torch.ones_like(model.module.y_embedder.embedding_table.weight)
+        label_embedding_mask[-1:] = 0.0
+        label_embedding_mask = label_embedding_mask.to(dtype=torch.float32, device=device)
 
     if use_diffusion:
         diffusion = create_diffusion(
@@ -106,10 +166,20 @@ def do_train(train_config, accelerator):
     if accelerator.is_main_process:
         logger.info(f"Model: {model}")
         logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+        logger.info(f"DiT Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M")
         logger.info(f"Optimizer: AdamW, lr={train_config['optimizer']['lr']}, beta2={train_config['optimizer']['beta2']}")
-    opt = torch.optim.AdamW(model.parameters(), lr=train_config['optimizer']['lr'], weight_decay=0, betas=(0.9, train_config['optimizer']['beta2']))
+        for name, param in model.named_parameters():
+            logger.info(f"{name+'.requires_grad':<60}: {param.requires_grad}")
+
+    opt = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()), 
+        lr=train_config['optimizer']['lr'], 
+        weight_decay=0, 
+        betas=(0.9, train_config['optimizer']['beta2'])
+        )
     
     # Setup data
+    uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
     dataset = ImgLatentDataset(
         data_dir=train_config['data']['data_path'],
         latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
@@ -144,7 +214,7 @@ def do_train(train_config, accelerator):
             latest_checkpoint = checkpoint_files[-1]
             checkpoint = torch.load(latest_checkpoint, map_location=lambda storage, loc: storage)
             model.load_state_dict(checkpoint['model'])
-            # opt.load_state_dict(checkpoint['opt'])
+            opt.load_state_dict(checkpoint['opt'])
             ema.load_state_dict(checkpoint['ema'])
             train_steps = int(latest_checkpoint.split('/')[-1].split('.')[0])
             if accelerator.is_main_process:
@@ -167,8 +237,9 @@ def do_train(train_config, accelerator):
     while True:
         for x, y in loader:
             x = x.to(device, non_blocking=True)
+            if uncondition:
+                y = (torch.ones_like(y) * train_config['data']['num_classes']).to(y.dtype)
             y = y.to(device, non_blocking=True)  
-
             model_kwargs = dict(y=y, clean_x=x)
             if use_diffusion:
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
@@ -184,6 +255,8 @@ def do_train(train_config, accelerator):
                     loss = loss_dict["loss"].mean()
             opt.zero_grad()
             accelerator.backward(loss)
+            if freeze_null_label:
+                model.module.module.y_embedder.embedding_table.weight.grad *= label_embedding_mask
             if 'max_grad_norm' in train_config['optimizer']:
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), train_config['optimizer']['max_grad_norm'])
@@ -212,7 +285,7 @@ def do_train(train_config, accelerator):
                 dist.all_reduce(avg_grad_norm, op=dist.ReduceOp.SUM)
                 avg_grad_norm = avg_grad_norm.item() / dist.get_world_size()
                 if accelerator.is_main_process:
-                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.2f}")
+                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.4f}")
                     accelerator.log({"loss": avg_loss, "grad_norm": avg_grad_norm}, step=train_steps)
                 # Reset monitoring variables:
                 running_loss = 0

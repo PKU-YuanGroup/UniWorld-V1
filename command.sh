@@ -25,7 +25,17 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/did_s_100kx1024_qf1x1_img0p5.yaml
+    --config configs/did_s_100kx1024_qf4x4_img1p0.yaml
+
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1234 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    train.py \
+    --config configs/ft/did_s_100kx1024_qf4x4_img1p0_train_all.yaml
 
 # inference
 cd /data/FlowWorld
@@ -37,7 +47,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/did_s_100kx1024_qf1x1_img0p5.yaml \
+    --config configs/ft/did_s_100kx1024_qf1x1_img0p0_uncond_zeroqf_train_all.yaml \
     --demo 
 
 # inference
@@ -50,7 +60,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference_did.py \
-    --config configs/did_s_100kx1024_qf1x1_img0p5.yaml \
+    --config configs/did_s_100kx1024_qf1x1_img1p0.yaml \
     --demo 
 
 # evaluator
@@ -65,4 +75,4 @@ cd /data/FlowWorld
 conda activate dit_eval
 python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
-    /data/logs/moc/did_s_100kx1024_qf1x1_img0p0/did-s-2-ckpt-0100000-250-diffusion.npz
+    /data/logs/moc/ft_did_s_100kx1024_qf1x1_img1p0_train_qf_em/did-s-2-ckpt-0100000-250-diffusion.npz

@@ -49,6 +49,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         cfg_interval_start = 0
         timestep_shift = 0
         cfg_scale = 4.0
+        # cfg_scale = 1.0
         if use_transport:
             cfg_scale = 9.0
 
@@ -189,13 +190,18 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         if accelerator.process_index == 0:
             images = []
             for label in tqdm([207, 360, 387, 974, 88, 979, 417, 279], desc="Generating Demo Samples"):
+            # for label in tqdm([207, 360, 387, 974, 88, 979, 417, 1000], desc="Generating Demo Samples"):
                 z = torch.randn(1, model.in_channels, latent_size, latent_size, device=device)
                 y = torch.tensor([label], device=device)
-                z = torch.cat([z, z], 0)
-                y_null = torch.tensor([1000] * 1, device=device)
-                y = torch.cat([y, y_null], 0)
-                model_kwargs = dict(y=y, cfg_scale=cfg_scale, cfg_interval=False, cfg_interval_start=cfg_interval_start)
-                model_fn = model.forward_with_cfg
+                if using_cfg:
+                    z = torch.cat([z, z], 0)
+                    y_null = torch.tensor([1000] * 1, device=device)
+                    y = torch.cat([y, y_null], 0)
+                    model_kwargs = dict(y=y, cfg_scale=cfg_scale, cfg_interval=False, cfg_interval_start=cfg_interval_start)
+                    model_fn = model.forward_with_cfg
+                else:
+                    model_kwargs = dict(y=y)
+                    model_fn = model.forward
                 if use_diffusion:
                     samples = sample_fn(model_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device)
                 else:
