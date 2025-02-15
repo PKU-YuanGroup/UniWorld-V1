@@ -15,18 +15,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from einops import rearrange
+
 from timm.models.vision_transformer import PatchEmbed, Mlp
 from models.swiglu_ffn import SwiGLUFFN 
 from models.pos_embed import VisionRotaryEmbeddingFast
 from models.rmsnorm import RMSNorm
 
-@torch.compile
+# @torch.compile
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    return x * (1 + scale) + shift
 
 class Attention(nn.Module):
     """
-    Attention module of DiT.
+    Attention module of TAD.
     """
     def __init__(
         self,
@@ -39,6 +41,7 @@ class Attention(nn.Module):
         norm_layer: nn.Module = nn.LayerNorm,
         fused_attn: bool = True,
         use_rmsnorm: bool = False,
+        causal_timestep: bool = False, 
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -47,6 +50,7 @@ class Attention(nn.Module):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
         self.fused_attn = fused_attn
+        self.causal_timestep = causal_timestep
         
         if use_rmsnorm:
             norm_layer = RMSNorm
@@ -70,12 +74,19 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
-                q, k, v,
+                q, k, v, is_causal=self.causal_timestep, 
                 dropout_p=self.attn_drop.p if self.training else 0.,
             )
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
+            if self.causal_timestep:
+                L, S = q.size(-2), k.size(-2)
+                attn_bias = torch.zeros(L, S, dtype=q.dtype, device=q.device)
+                temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+                attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
+                attn_bias.to(q.dtype)
+                attn += attn_bias
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
             x = attn @ v
@@ -89,7 +100,7 @@ class Attention(nn.Module):
 class TimestepEmbedder(nn.Module):
     """
     Embeds scalar timesteps into vector representations.
-    Same as DiT.
+    Same as TAD.
     """
     def __init__(self, hidden_size: int, frequency_embedding_size: int = 256) -> None:
         super().__init__()
@@ -105,13 +116,19 @@ class TimestepEmbedder(nn.Module):
         """
         Create sinusoidal timestep embeddings.
         Args:
-            t: A 1-D Tensor of N indices, one per batch element. These may be fractional.
+            t: A 1-D (2-D) Tensor of N (N, Tokens) indices, one per batch element. These may be fractional.
             dim: The dimension of the output.
             max_period: Controls the minimum frequency of the embeddings.
         Returns:
             An (N, D) Tensor of positional embeddings.
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+
+        is_2d_t = t.ndim == 2
+        if is_2d_t:
+            N, num_tokens = t.shape
+            t = t.flatten()
+
         half = dim // 2
         freqs = torch.exp(
             -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
@@ -122,10 +139,14 @@ class TimestepEmbedder(nn.Module):
         
         if dim % 2:
             embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-            
+
+        if is_2d_t:
+            embedding = embedding.reshape(N, num_tokens, -1)
+        else:
+            embedding = embedding.reshape(N, 1, -1)
         return embedding
     
-    @torch.compile
+    # @torch.compile
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
@@ -135,7 +156,7 @@ class TimestepEmbedder(nn.Module):
 class LabelEmbedder(nn.Module):
     """
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
-    Same as DiT.
+    Same as TAD.
     """
     def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
@@ -155,7 +176,7 @@ class LabelEmbedder(nn.Module):
         labels = torch.where(drop_ids, self.num_classes, labels)
         return labels
 
-    @torch.compile
+    # @torch.compile
     def forward(self, labels, train, force_drop_ids=None):
         use_dropout = self.dropout_prob > 0
         if (train and use_dropout) or (force_drop_ids is not None):
@@ -163,9 +184,9 @@ class LabelEmbedder(nn.Module):
         embeddings = self.embedding_table(labels)
         return embeddings
     
-class DiTBlock(nn.Module):
+class TADBlock(nn.Module):
     """
-     DiT Block. We add features including: 
+     TAD Block. We add features including: 
     - ROPE
     - QKNorm 
     - RMSNorm
@@ -223,16 +244,16 @@ class DiTBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
     
-    @torch.compile
+    # @torch.compile
     def forward(self, x, c, feat_rope=None):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=2)
+        x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
+        x = x + gate_mlp * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
 
 class FinalLayer(nn.Module):
     """
-    The final layer of DiT.
+    The final layer of TAD.
     """
     def __init__(self, hidden_size, patch_size, out_channels, use_rmsnorm=False):
         super().__init__()
@@ -245,15 +266,39 @@ class FinalLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
-    @torch.compile
+    # @torch.compile
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=2)
         x = modulate(self.norm_final(x), shift, scale)
         x = self.linear(x)
         return x
 
 
-class DiT(nn.Module):
+class FinalLayerCLS(nn.Module):
+    """
+    The final layer of TAD.
+    """
+    def __init__(self, hidden_size, cls_info, use_rmsnorm=False):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.cls_on_token = cls_info['cls_on_token']
+        if not use_rmsnorm:
+            self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        else:
+            self.norm_final = RMSNorm(hidden_size)
+        self.linear = nn.Linear(hidden_size, cls_info['num_classes'], bias=True)
+        
+    # @torch.compile
+    def forward(self, x):
+        if self.cls_on_token:
+            x = x.reshape(-1, self.hidden_size)
+        else:
+            x = x.mean(dim=1)
+        x = self.norm_final(x)
+        x = self.linear(x)
+        return x
+    
+class TAD(nn.Module):
     """
     Diffusion model with a Transformer backbone.
     """
@@ -274,8 +319,14 @@ class DiT(nn.Module):
         use_rope=False,
         use_rmsnorm=False,
         use_checkpoint=False,
+        causal_timestep=False, 
+        timestep_descending=False, 
+        timestep_tokenwise=False, 
+        gen_info={}, 
+        cls_info={}, 
     ):
         super().__init__()
+        self.input_size = input_size
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels if not learn_sigma else in_channels * 2
@@ -286,6 +337,13 @@ class DiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
+        self.causal_timestep = causal_timestep
+        self.timestep_descending = timestep_descending
+        self.timestep_tokenwise = timestep_tokenwise
+        self.gen_info = gen_info
+        self.cls_info = cls_info
+
+        assert (not timestep_tokenwise) or (timestep_tokenwise and patch_size == 1)
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -305,16 +363,27 @@ class DiT(nn.Module):
             self.feat_rope = None
 
         self.blocks = nn.ModuleList([
-            DiTBlock(
+            TADBlock(
                 hidden_size, 
                 num_heads, 
                 mlp_ratio=mlp_ratio, 
                 use_qknorm=use_qknorm, 
                 use_swiglu=use_swiglu, 
                 use_rmsnorm=use_rmsnorm,
+                causal_timestep=causal_timestep, 
                 ) for i in range(depth)
         ])
-        self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
+
+        self.enable_gen_head = gen_info['enable']
+        self.enable_cls_head = cls_info['enable']
+        if self.enable_gen_head:
+            self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
+        if self.enable_cls_head:
+            self.refresh = cls_info['refresh']
+            if self.refresh:
+                self.final_layer_cls_refresh = FinalLayerCLS(hidden_size, cls_info, use_rmsnorm=use_rmsnorm)
+            else:
+                self.final_layer_cls = FinalLayerCLS(hidden_size, cls_info, use_rmsnorm=use_rmsnorm)
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -342,16 +411,24 @@ class DiT(nn.Module):
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
+        # Zero-out adaLN modulation layers in TAD blocks:
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        if self.enable_gen_head:
+            nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+            nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+            nn.init.constant_(self.final_layer.linear.weight, 0)
+            nn.init.constant_(self.final_layer.linear.bias, 0)
+        if self.enable_cls_head:
+            if self.refresh:
+                nn.init.constant_(self.final_layer_cls_refresh.linear.weight, 0)
+                nn.init.constant_(self.final_layer_cls_refresh.linear.bias, 0)
+            else:
+                nn.init.constant_(self.final_layer_cls.linear.weight, 0)
+                nn.init.constant_(self.final_layer_cls.linear.bias, 0)
 
     def unpatchify(self, x):
         """
@@ -368,18 +445,42 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
+    def sort_by_timestep(self, x, t):
+        """
+        Per-sample sorting is done by timestep.
+        x: [N, L, D], sequence
+        t: [N, L], 2D timestep
+        """
+        N, L, D = x.shape  # batch, length, dim
+        
+        # sort each sample by timestep
+        ids_shuffle = torch.argsort(t, dim=1, descending=self.timestep_descending)
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+
+        # rearrange x
+        x_rearranged = torch.gather(x, dim=1, index=ids_shuffle.unsqueeze(-1).repeat(1, 1, D))
+        t_rearranged = torch.gather(t, dim=1, index=ids_shuffle)
+        return x_rearranged, t_rearranged, ids_restore
+
+
     def forward(self, x, t=None, y=None, **kwargs):
         """
-        Forward pass of DiT.
+        Forward pass of TAD.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
         t: (N,) tensor of diffusion timesteps
         y: (N,) tensor of class labels
         use_checkpoint: boolean to toggle checkpointing
         """
+        if self.timestep_tokenwise:
+            x = rearrange(x, '(b h w) c -> b c h w', h=self.input_size, w=self.input_size).contiguous()
+            B = x.shape[0]
+            t = t.reshape(B, -1)
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y                                # (N, D)
+        if self.causal_timestep:
+            x, t, ids_restore = self.sort_by_timestep(x, t)
+        t = self.t_embedder(t)                   # (N, 1 or T, D)
+        y = self.y_embedder(y, self.training)    # (N, 1, D)
+        c = t + y.unsqueeze(1)                     # (N, 1 or T, D)
         
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
@@ -387,19 +488,30 @@ class DiT(nn.Module):
             else:
                 x = block(x, c, self.feat_rope)
 
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
-        x = self.unpatchify(x)                   # (N, out_channels, H, W)
-
-        return x
+        
+        logit_gen, logit_cls = None, None
+        if self.enable_gen_head:
+            logit_gen = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
+            if self.causal_timestep:
+                logit_gen = torch.gather(logit_gen, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, logit_gen.shape[2]))
+            logit_gen = self.unpatchify(logit_gen)                   # (N, out_channels, H, W)
+            if self.timestep_tokenwise:
+                logit_gen = rearrange(logit_gen, 'b c h w -> (b h w) c')
+        if self.enable_cls_head:
+            if self.refresh:
+                logit_cls = self.final_layer_cls_refresh(x)
+            else:
+                logit_cls = self.final_layer_cls(x)              # (N, tokens, num_classes)
+        return (logit_gen, logit_cls)
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=None, cfg_interval_start=None):
         """
-        Forward pass of DiT, but also batches the unconditional forward pass for classifier-free guidance.
+        Forward pass of TAD, but also batches the unconditional forward pass for classifier-free guidance.
         """
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, y)[0]
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.
@@ -467,49 +579,49 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
 
 #################################################################################
-#                             DiT Configs                              #
+#                             TAD Configs                              #
 #################################################################################
 
-def DiT_S_1(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=1, num_heads=6, **kwargs)
+def TAD_S_1(**kwargs):
+    return TAD(depth=12, hidden_size=384, patch_size=1, num_heads=6, **kwargs)
 
-def DiT_S_2(**kwargs):
-    return DiT(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
+def TAD_S_2(**kwargs):
+    return TAD(depth=12, hidden_size=384, patch_size=2, num_heads=6, **kwargs)
 
-def DiT_XL_1(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=1, num_heads=16, **kwargs)
+def TAD_XL_1(**kwargs):
+    return TAD(depth=28, hidden_size=1152, patch_size=1, num_heads=16, **kwargs)
 
-def DiT_XL_2(**kwargs):
-    return DiT(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
+def TAD_XL_2(**kwargs):
+    return TAD(depth=28, hidden_size=1152, patch_size=2, num_heads=16, **kwargs)
 
-def DiT_L_2(**kwargs):
-    return DiT(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
+def TAD_L_2(**kwargs):
+    return TAD(depth=24, hidden_size=1024, patch_size=2, num_heads=16, **kwargs)
 
-def DiT_B_1(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=1, num_heads=12, **kwargs)
+def TAD_B_1(**kwargs):
+    return TAD(depth=12, hidden_size=768, patch_size=1, num_heads=12, **kwargs)
 
-def DiT_B_2(**kwargs):
-    return DiT(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
+def TAD_B_2(**kwargs):
+    return TAD(depth=12, hidden_size=768, patch_size=2, num_heads=12, **kwargs)
 
-def DiT_1p0B_1(**kwargs):
-    return DiT(depth=24, hidden_size=1536, patch_size=1, num_heads=24, **kwargs)
+def TAD_1p0B_1(**kwargs):
+    return TAD(depth=24, hidden_size=1536, patch_size=1, num_heads=24, **kwargs)
 
-def DiT_1p0B_2(**kwargs):
-    return DiT(depth=24, hidden_size=1536, patch_size=2, num_heads=24, **kwargs)
+def TAD_1p0B_2(**kwargs):
+    return TAD(depth=24, hidden_size=1536, patch_size=2, num_heads=24, **kwargs)
 
-def DiT_1p6B_1(**kwargs):
-    return DiT(depth=28, hidden_size=1792, patch_size=1, num_heads=28, **kwargs)
+def TAD_1p6B_1(**kwargs):
+    return TAD(depth=28, hidden_size=1792, patch_size=1, num_heads=28, **kwargs)
 
-def DiT_1p6B_2(**kwargs):
-    return DiT(depth=28, hidden_size=1792, patch_size=2, num_heads=28, **kwargs)
+def TAD_1p6B_2(**kwargs):
+    return TAD(depth=28, hidden_size=1792, patch_size=2, num_heads=28, **kwargs)
 
-DiT_models = {
-    'DiT-S/1':  DiT_S_1, 'DiT-S/2':  DiT_S_2, 
-    'DiT-B/1': DiT_B_1, 'DiT-B/2': DiT_B_2,
-    'DiT-L/2': DiT_L_2,
-    'DiT-XL/1': DiT_XL_1, 'DiT-XL/2': DiT_XL_2,
-    'DiT-1p0B/1': DiT_1p0B_1, 'DiT-1p0B/2': DiT_1p0B_2,
-    'DiT-1p6B/1': DiT_1p6B_1, 'DiT-1p6B/2': DiT_1p6B_2,
+TAD_models = {
+    'TAD-S/1': TAD_S_1, 'TAD-S/2':  TAD_S_2, 
+    'TAD-B/1': TAD_B_1, 'TAD-B/2': TAD_B_2,
+    'TAD-L/2': TAD_L_2,
+    'TAD-XL/1': TAD_XL_1, 'TAD-XL/2': TAD_XL_2,
+    'TAD-1p0B/1': TAD_1p0B_1, 'TAD-1p0B/2': TAD_1p0B_2,
+    'TAD-1p6B/1': TAD_1p6B_1, 'TAD-1p6B/2': TAD_1p6B_2,
 }
 
 if __name__ == '__main__':
@@ -526,24 +638,59 @@ if __name__ == '__main__':
     assert train_config['data']['image_size'] % downsample_ratio == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = train_config['data']['image_size'] // downsample_ratio
     in_channels = train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4
-    model = DiT_models[train_config['model']['model_type']](
+
+    use_diffusion = train_config['scheduler']['diffusion'] if 'diffusion' in train_config['scheduler'] else False
+    kwargs = dict(
         input_size=latent_size,
         num_classes=train_config['data']['num_classes'],
         use_qknorm=train_config['model']['use_qknorm'],
         use_swiglu=train_config['model']['use_swiglu'] if 'use_swiglu' in train_config['model'] else False,
         use_rope=train_config['model']['use_rope'] if 'use_rope' in train_config['model'] else False,
         use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
-        in_channels=in_channels, 
+        in_channels=train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4,
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
-    ).cuda()
+        learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
+    )
+    if 'causal_timestep' in train_config['model']:
+        kwargs.update(dict(causal_timestep=train_config['model']['causal_timestep']))
+    if 'timestep_descending' in train_config['model']:
+        kwargs.update(dict(timestep_descending=train_config['model']['timestep_descending']))
+    if 'timestep_tokenwise' in train_config['model']:
+        kwargs.update(dict(timestep_tokenwise=train_config['model']['timestep_tokenwise']))
+    if 'gen_info' in train_config['model']:
+        kwargs.update(dict(gen_info=train_config['model']['gen_info']))
+    if 'cls_info' in train_config['model']:
+        kwargs.update(dict(cls_info=train_config['model']['cls_info']))
+
+    model = TAD_models[train_config['model']['model_type']](**kwargs).cuda()
 
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
     bsz = 2
-    x = torch.rand(bsz, in_channels, latent_size, latent_size).cuda()
-    t = torch.rand(bsz).cuda()
+    x = torch.randn(bsz, in_channels, latent_size, latent_size).cuda()
+    # t = torch.randint(0, 1000, (bsz, )).cuda()
+    t = torch.randint(0, 1000, (bsz, latent_size*latent_size//model.patch_size//model.patch_size)).cuda()
     y = torch.randint(0, 1000, (bsz, )).cuda()
 
-    logit = model(x, t, y)
-    print(logit.shape)
+    # logit_gen, logit_cls = model(x, t, y)
+    # if logit_gen is not None:
+    #     print(logit_gen.shape)
+    # if logit_cls is not None:
+    #     print(logit_cls.shape)
+
+    import sys
+    import os
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from diffusion import create_diffusion
+    diffusion = create_diffusion(
+            timestep_respacing="", 
+            learn_sigma=train_config['diffusion']['learn_sigma'], 
+            diffusion_steps=train_config['diffusion']['diffusion_steps'], 
+            )  # default: 1000 steps, linear noise schedule
+    model_kwargs = dict(y=y, clean_x=x)
+
+    x = rearrange(x, 'b c h w -> (b h w) c')
+    t = rearrange(t, 'b hw -> (b hw)')
+    loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
+    print(loss_dict)

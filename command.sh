@@ -6,12 +6,12 @@ pip install -e .
 # extract_feature
 cd /data/FlowWorld
 conda activate dit
-torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_feature \
-    --data_path /mnt/data/lb/ImageNet-1K/train \
+torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
+    --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/train \
     --data_split imagenet_train \
-    --output_path /mnt/data/lb/offline_vae_512 \
-    --vae /mnt/data/lb/checkpoint/stabilityai/sd-vae-ft-ema \
-    --image_size 512 \
+    --output_path /data/checkpoints/LanguageBind/offline_feature/offline_vae_128 \
+    --vae /data/checkpoints/stabilityai/sd-vae-ft-ema \
+    --image_size 128 \
     --batch_size 20 \
     --num_workers 16 
 
@@ -24,8 +24,20 @@ accelerate launch \
     --machine_rank 0 \
     --num_processes 8 \
     --num_machines 1 \
+    train_tad.py \
+    --config configs/tad_128_s_p1_100kx1024.yaml
+
+    
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1235 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
     train.py \
-    --config configs/diff_s_1000kx1024.yaml
+    --config configs/diff_128_s_p1_100kx1024.yaml
 
 cd /data/FlowWorld
 conda activate dit

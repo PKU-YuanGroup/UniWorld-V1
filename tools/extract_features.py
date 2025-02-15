@@ -16,15 +16,13 @@ import os
 from safetensors.torch import save_file
 from datetime import datetime
 from diffusers.models import AutoencoderKL
-import os
 import torch
-import requests
-from tqdm import tqdm
 import numpy as np
-import torch.nn as nn
 from PIL import Image
 from torchvision import transforms
-from ..datasets.img_latent_dataset import ImgLatentDataset
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from datasets.img_latent_dataset import ImgLatentDataset
 
 def center_crop_arr(pil_image, image_size):
     """
