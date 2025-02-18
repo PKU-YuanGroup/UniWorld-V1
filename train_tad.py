@@ -26,12 +26,36 @@ from time import time
 from glob import glob
 from copy import deepcopy
 from collections import OrderedDict
+from torch import nn
+import torch.nn.functional as F
 # local imports
 from diffusion import create_diffusion
 from models import Models
 from transport import create_transport
 from accelerate import Accelerator
 from datasets.img_latent_dataset import ImgLatentDataset
+
+
+def gaussian_label_smoothing(t, num_classes=1000, sigma=10.0):
+    """ soft labels """
+    indices = torch.arange(num_classes, device=t.device).float()  # 生成 0~999
+    t = t.float().unsqueeze(1)  # (batch_size, 1)
+
+    weights = torch.exp(-0.5 * ((indices - t) / (sigma+1e-10)) ** 2)  # (batch_size, num_classes)
+    weights = weights / weights.sum(dim=1, keepdim=True)  # 归一化
+    return weights  # (batch_size, num_classes)
+
+
+class GaussianSmoothedCrossEntropy(nn.Module):
+    def __init__(self, sigma=8):
+        super().__init__()
+        self.sigma = sigma
+
+    def forward(self, logits, t):
+        soft_labels = gaussian_label_smoothing(t, num_classes=logits.size(-1), sigma=self.sigma)
+        log_probs = F.log_softmax(logits, dim=-1)
+        return (-soft_labels * log_probs).sum(dim=-1).mean()
+    
 
 def load_weights_with_shape_check(model, checkpoint, rank=0):
     model_state_dict = model.state_dict()
@@ -155,8 +179,18 @@ def do_train(train_config, accelerator):
             use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
         )  # default: velocity; 
 
+    criterion = 'None'
+    if cls_info['enable']:
+        sigma = train_config['cls_loss']['sigma'] if 'sigma' in train_config['cls_loss'] else 0
+        if sigma > 0:
+            criterion = GaussianSmoothedCrossEntropy(sigma=sigma)
+        else:
+            from timm.loss import LabelSmoothingCrossEntropy
+            criterion = LabelSmoothingCrossEntropy(smoothing=train_config['cls_loss']['smoothing'])
+
     if accelerator.is_main_process:
         logger.info(f"Model: {model}")
+        logger.info(f"CLS Criterion: {criterion}")
         logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
         logger.info(f"DiT Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M")
         logger.info(f"Optimizer: AdamW, lr={train_config['optimizer']['lr']}, beta2={train_config['optimizer']['beta2']}")
@@ -221,6 +255,8 @@ def do_train(train_config, accelerator):
         train_steps = 0
     log_steps = 0
     running_loss = 0
+    running_cls_loss = 0
+    running_gen_loss = 0
     running_grad_norm = 0
     start_time = time()
     if accelerator.is_main_process:
@@ -240,8 +276,19 @@ def do_train(train_config, accelerator):
                 else:
                     t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                loss = loss_dict["loss"].mean()
+                if cls_info['enable']:
+                    end_steps = train_config['cls_loss']['end_steps'] if 'end_steps' in train_config['cls_loss'] else 10000000
+                    assert not cls_info['refresh']
+                    cls_logit = loss_dict['cls_logit'].reshape(-1, cls_info['num_classes'])
+                    targets = t
+                    cls_w = train_config['cls_loss']['cls_w'] if train_steps < end_steps else 0.0
+                    cls_loss = criterion(cls_logit, targets)
+                    gen_loss = loss_dict["loss"].mean()
+                    loss = (1 - cls_w) * gen_loss + cls_w * cls_loss
+                else:
+                    loss = loss_dict["loss"].mean()
             else:
+                raise NotImplementedError()
                 loss_dict = transport.training_losses(model, x, model_kwargs)
                 
                 if 'cos_loss' in loss_dict:
@@ -263,6 +310,11 @@ def do_train(train_config, accelerator):
                 running_loss += mse_loss.item()
             else:
                 running_loss += loss.item()
+
+            if cls_info['enable']:
+                running_cls_loss += cls_loss.item()
+                running_gen_loss += gen_loss.item()
+
             log_steps += 1
             train_steps += 1
             if train_steps % train_config['train']['log_every'] == 0:
@@ -278,11 +330,29 @@ def do_train(train_config, accelerator):
                 avg_grad_norm = torch.tensor(running_grad_norm / log_steps, device=device)
                 dist.all_reduce(avg_grad_norm, op=dist.ReduceOp.SUM)
                 avg_grad_norm = avg_grad_norm.item() / dist.get_world_size()
+                if running_cls_loss != 0:
+                    avg_cls_loss = torch.tensor(running_cls_loss / log_steps, device=device)
+                    dist.all_reduce(avg_cls_loss, op=dist.ReduceOp.SUM)
+                    avg_cls_loss = avg_cls_loss.item() / dist.get_world_size()
+
+                    avg_gen_loss = torch.tensor(running_gen_loss / log_steps, device=device)
+                    dist.all_reduce(avg_gen_loss, op=dist.ReduceOp.SUM)
+                    avg_gen_loss = avg_gen_loss.item() / dist.get_world_size()
+
                 if accelerator.is_main_process:
-                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.4f}")
-                    accelerator.log({"loss": avg_loss, "grad_norm": avg_grad_norm}, step=train_steps)
+                    local_log = f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.4f}"
+                    if running_cls_loss != 0:
+                        local_log += f", CLS loss: {avg_cls_loss:.4f}, GEN loss: {avg_gen_loss:.4f}"
+                    logger.info(local_log)
+
+                    accelerator_log_dict = {"loss": avg_loss, "grad_norm": avg_grad_norm}
+                    if running_cls_loss != 0:
+                        accelerator_log_dict.update({"cls_loss": avg_cls_loss, "gen_loss": avg_gen_loss})
+                    accelerator.log(accelerator_log_dict, step=train_steps)
                 # Reset monitoring variables:
                 running_loss = 0
+                running_cls_loss = 0
+                running_gen_loss = 0
                 running_grad_norm = 0
                 log_steps = 0
                 start_time = time()

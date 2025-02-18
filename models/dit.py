@@ -274,6 +274,7 @@ class DiT(nn.Module):
         use_rope=False,
         use_rmsnorm=False,
         use_checkpoint=False,
+        **kwargs,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -286,6 +287,7 @@ class DiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
+        self.return_features = kwargs.pop('return_features', False)
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -381,16 +383,19 @@ class DiT(nn.Module):
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
         
+        features = [t, y, c, torch.mean(x, dim=1)]
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
                 x = checkpoint(block, x, c, self.feat_rope, use_reentrant=True)
             else:
                 x = block(x, c, self.feat_rope)
+            if self.return_features:
+                features.append(torch.mean(x, dim=1))
 
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
-        return x
+        return x, features
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=None, cfg_interval_start=None):
         """
@@ -399,7 +404,7 @@ class DiT(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)
+        model_out = self.forward(combined, t, y)[0]
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.

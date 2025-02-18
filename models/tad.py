@@ -22,7 +22,23 @@ from models.swiglu_ffn import SwiGLUFFN
 from models.pos_embed import VisionRotaryEmbeddingFast
 from models.rmsnorm import RMSNorm
 
-# @torch.compile
+
+class REPA_MLP(nn.Module):
+    def __init__(self, hidden_size, projector_dim, z_dim):
+        super().__init__()
+        self.mlp = nn.Sequential(
+                    nn.Linear(hidden_size, projector_dim),
+                    nn.SiLU(),
+                    nn.Linear(projector_dim, projector_dim),
+                    nn.SiLU(),
+                    nn.Linear(projector_dim, z_dim),
+                )
+        
+    @torch.compile
+    def forward(self, x):
+        return self.mlp(x)
+
+@torch.compile
 def modulate(x, shift, scale):
     return x * (1 + scale) + shift
 
@@ -74,13 +90,13 @@ class Attention(nn.Module):
 
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
-                q, k, v, is_causal=self.causal_timestep, 
+                q, k, v, is_causal=self.causal_timestep and self.training, 
                 dropout_p=self.attn_drop.p if self.training else 0.,
             )
         else:
             q = q * self.scale
             attn = q @ k.transpose(-2, -1)
-            if self.causal_timestep:
+            if self.causal_timestep and self.training:
                 L, S = q.size(-2), k.size(-2)
                 attn_bias = torch.zeros(L, S, dtype=q.dtype, device=q.device)
                 temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
@@ -128,6 +144,8 @@ class TimestepEmbedder(nn.Module):
         if is_2d_t:
             N, num_tokens = t.shape
             t = t.flatten()
+        else:
+            N = t.shape[0]
 
         half = dim // 2
         freqs = torch.exp(
@@ -146,7 +164,7 @@ class TimestepEmbedder(nn.Module):
             embedding = embedding.reshape(N, 1, -1)
         return embedding
     
-    # @torch.compile
+    @torch.compile
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq)
@@ -176,7 +194,7 @@ class LabelEmbedder(nn.Module):
         labels = torch.where(drop_ids, self.num_classes, labels)
         return labels
 
-    # @torch.compile
+    @torch.compile
     def forward(self, labels, train, force_drop_ids=None):
         use_dropout = self.dropout_prob > 0
         if (train and use_dropout) or (force_drop_ids is not None):
@@ -244,7 +262,7 @@ class TADBlock(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size, bias=True)
         )
     
-    # @torch.compile
+    @torch.compile
     def forward(self, x, c, feat_rope=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=2)
         x = x + gate_msa * self.attn(modulate(self.norm1(x), shift_msa, scale_msa), rope=feat_rope)
@@ -266,7 +284,7 @@ class FinalLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, 2 * hidden_size, bias=True)
         )
-    # @torch.compile
+    @torch.compile
     def forward(self, x, c):
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=2)
         x = modulate(self.norm_final(x), shift, scale)
@@ -282,14 +300,26 @@ class FinalLayerCLS(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.cls_on_token = cls_info['cls_on_token']
+        self.repa_mlp = cls_info['repa_mlp'] if 'repa_mlp' in cls_info else False
         if not use_rmsnorm:
             self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         else:
             self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(hidden_size, cls_info['num_classes'], bias=True)
         
-    # @torch.compile
-    def forward(self, x):
+    @torch.compile
+    def forward(self, x, c, feat_rope, use_checkpoint=False):
+        N, T, D = x.shape
+        if hasattr(self, 'blocks'):
+            if self.repa_mlp:
+                x = self.blocks(x.reshape(-1, D)).reshape(N, T, -1)
+            else:
+                for idx, block in enumerate(self.blocks):
+                    if use_checkpoint:
+                        x = checkpoint(block, x, c, feat_rope, use_reentrant=True)
+                    else:
+                        x = block(x, c, feat_rope)
+
         if self.cls_on_token:
             x = x.reshape(-1, self.hidden_size)
         else:
@@ -379,11 +409,28 @@ class TAD(nn.Module):
         if self.enable_gen_head:
             self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
         if self.enable_cls_head:
+            self.encoder_depth = cls_info['encoder_depth'] if 'encoder_depth' in cls_info else depth
             self.refresh = cls_info['refresh']
             if self.refresh:
                 self.final_layer_cls_refresh = FinalLayerCLS(hidden_size, cls_info, use_rmsnorm=use_rmsnorm)
             else:
                 self.final_layer_cls = FinalLayerCLS(hidden_size, cls_info, use_rmsnorm=use_rmsnorm)
+                num_decoder_block = cls_info['num_decoder_block'] if 'num_decoder_block' in cls_info else 0
+                self.repa_mlp = cls_info['repa_mlp'] if 'repa_mlp' in cls_info else False
+                if self.repa_mlp:
+                    self.final_layer_cls.blocks = REPA_MLP(hidden_size, int(4*hidden_size), hidden_size)
+                elif num_decoder_block > 0:
+                    self.final_layer_cls.blocks = nn.ModuleList([
+                        TADBlock(
+                            hidden_size, 
+                            num_heads, 
+                            mlp_ratio=mlp_ratio, 
+                            use_qknorm=use_qknorm, 
+                            use_swiglu=use_swiglu, 
+                            use_rmsnorm=use_rmsnorm,
+                            causal_timestep=False, 
+                            ) for _ in range(num_decoder_block)
+                    ])
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -415,6 +462,10 @@ class TAD(nn.Module):
         for block in self.blocks:
             nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
             nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
+        if hasattr(self, 'final_layer_cls') and hasattr(self.final_layer_cls, 'blocks') and not self.repa_mlp:
+            for block in self.final_layer_cls.blocks:
+                nn.init.constant_(block.adaLN_modulation[-1].weight, 0)
+                nn.init.constant_(block.adaLN_modulation[-1].bias, 0)
 
         # Zero-out output layers:
         if self.enable_gen_head:
@@ -471,37 +522,38 @@ class TAD(nn.Module):
         y: (N,) tensor of class labels
         use_checkpoint: boolean to toggle checkpointing
         """
-        if self.timestep_tokenwise:
+        if self.timestep_tokenwise and self.training:
             x = rearrange(x, '(b h w) c -> b c h w', h=self.input_size, w=self.input_size).contiguous()
             B = x.shape[0]
             t = t.reshape(B, -1)
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        if self.causal_timestep:
+        if self.causal_timestep and self.training:
             x, t, ids_restore = self.sort_by_timestep(x, t)
         t = self.t_embedder(t)                   # (N, 1 or T, D)
         y = self.y_embedder(y, self.training)    # (N, 1, D)
         c = t + y.unsqueeze(1)                     # (N, 1 or T, D)
         
+        logit_gen, logit_cls = None, None
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
                 x = checkpoint(block, x, c, self.feat_rope, use_reentrant=True)
             else:
                 x = block(x, c, self.feat_rope)
+            if self.enable_cls_head:
+                if (idx + 1) == self.encoder_depth:
+                    if self.refresh:
+                        logit_cls = self.final_layer_cls_refresh(x)
+                    else:
+                        logit_cls = self.final_layer_cls(x, c, self.feat_rope, self.use_checkpoint)   # (N, tokens, num_classes)
 
         
-        logit_gen, logit_cls = None, None
         if self.enable_gen_head:
             logit_gen = self.final_layer(x, c)               # (N, T, patch_size ** 2 * out_channels)
-            if self.causal_timestep:
+            if self.causal_timestep and self.training:
                 logit_gen = torch.gather(logit_gen, dim=1, index=ids_restore.unsqueeze(-1).repeat(1, 1, logit_gen.shape[2]))
             logit_gen = self.unpatchify(logit_gen)                   # (N, out_channels, H, W)
-            if self.timestep_tokenwise:
+            if self.timestep_tokenwise and self.training:
                 logit_gen = rearrange(logit_gen, 'b c h w -> (b h w) c')
-        if self.enable_cls_head:
-            if self.refresh:
-                logit_cls = self.final_layer_cls_refresh(x)
-            else:
-                logit_cls = self.final_layer_cls(x)              # (N, tokens, num_classes)
         return (logit_gen, logit_cls)
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=None, cfg_interval_start=None):
@@ -627,7 +679,7 @@ TAD_models = {
 if __name__ == '__main__':
     import yaml
 
-    config_path = 'configs/debug.yaml'
+    config_path = 'configs/tad_128_s_p1_100kx1024_cls0p1_mlp2at4.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     # Create model:
@@ -673,24 +725,24 @@ if __name__ == '__main__':
     t = torch.randint(0, 1000, (bsz, latent_size*latent_size//model.patch_size//model.patch_size)).cuda()
     y = torch.randint(0, 1000, (bsz, )).cuda()
 
-    # logit_gen, logit_cls = model(x, t, y)
-    # if logit_gen is not None:
-    #     print(logit_gen.shape)
-    # if logit_cls is not None:
-    #     print(logit_cls.shape)
+    logit_gen, logit_cls = model(x, t, y)
+    if logit_gen is not None:
+        print(logit_gen.shape)
+    if logit_cls is not None:
+        print(logit_cls.shape)
 
-    import sys
-    import os
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    from diffusion import create_diffusion
-    diffusion = create_diffusion(
-            timestep_respacing="", 
-            learn_sigma=train_config['diffusion']['learn_sigma'], 
-            diffusion_steps=train_config['diffusion']['diffusion_steps'], 
-            )  # default: 1000 steps, linear noise schedule
-    model_kwargs = dict(y=y, clean_x=x)
+    # import sys
+    # import os
+    # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    # from diffusion import create_diffusion
+    # diffusion = create_diffusion(
+    #         timestep_respacing="", 
+    #         learn_sigma=train_config['diffusion']['learn_sigma'], 
+    #         diffusion_steps=train_config['diffusion']['diffusion_steps'], 
+    #         )  # default: 1000 steps, linear noise schedule
+    # model_kwargs = dict(y=y, clean_x=x)
 
-    x = rearrange(x, 'b c h w -> (b h w) c')
-    t = rearrange(t, 'b hw -> (b hw)')
-    loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-    print(loss_dict)
+    # x = rearrange(x, 'b c h w -> (b h w) c')
+    # t = rearrange(t, 'b hw -> (b hw)')
+    # loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
+    # print(loss_dict)

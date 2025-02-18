@@ -747,9 +747,11 @@ class GaussianDiffusion:
             model_output_tuple = model(x_t, t, **model_kwargs)
             ##############################################
             if isinstance(model_output_tuple, tuple):
-                model_output = model_output_tuple[0]
+                model_output, model_output_cls_logit = model_output_tuple
             else:
                 model_output = model_output_tuple
+                model_output_cls_logit = None
+            terms["cls_logit"] = model_output_cls_logit
             ##############################################
             if self.model_var_type in [
                 ModelVarType.LEARNED,

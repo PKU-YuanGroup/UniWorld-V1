@@ -311,8 +311,20 @@ if __name__ == "__main__":
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
     )
-    if 'decoder' in train_config['model']:
-        kwargs.update(dict(decoder=train_config['model']['decoder']))
+    causal_timestep = train_config['model']['causal_timestep'] if 'causal_timestep' in train_config['model'] else False
+    timestep_descending = train_config['model']['timestep_descending'] if 'timestep_descending' in train_config['model'] else True
+    timestep_tokenwise = train_config['model']['timestep_tokenwise'] if 'timestep_tokenwise' in train_config['model'] else False
+    gen_info = train_config['model']['gen_info'] if 'gen_info' in train_config['model'] else {'enable': True}
+    cls_info = train_config['model']['cls_info'] if 'cls_info' in train_config['model'] else {'enable': False}
+    kwargs.update(
+        dict(
+            causal_timestep=causal_timestep, 
+            timestep_descending=timestep_descending, 
+            timestep_tokenwise=timestep_tokenwise, 
+            gen_info=gen_info, 
+            cls_info=cls_info, 
+            )
+            )
     model = Models[train_config['model']['model_type']](**kwargs)
 
     # naive sample

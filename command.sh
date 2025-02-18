@@ -15,12 +15,26 @@ torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
     --batch_size 20 \
     --num_workers 16 
 
+
+cd /data/FlowWorld
+conda activate dit
+torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_dit_features \
+    --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/val \
+    --data_split imagenet_val \
+    --output_path /data/checkpoints/LanguageBind/offline_feature/offline_dit_s_feature_256 \
+    --vae /data/checkpoints/stabilityai/sd-vae-ft-ema \
+    --image_size 256 \
+    --batch_size 1 \
+    --num_workers 16 \
+    --num_diffusion_steps 1000 \
+    --config configs/diff_s_1000kx1024_fp32_get_feature.yaml
+
 # train
 cd /data/FlowWorld
 conda activate dit
 accelerate launch \
     --main_process_ip 127.0.0.1 \
-    --main_process_port 1235 \
+    --main_process_port 1236 \
     --machine_rank 0 \
     --num_processes 8 \
     --num_machines 1 \
@@ -100,8 +114,21 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/ft/did_s_100kx1024_qf1x1_img0p0_uncond_zeroqf_train_all.yaml \
+    --config configs/finetune/diff_128_s_p1_100kx1024.yaml \
     --demo 
+
+
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1235 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    inference.py \
+    --config configs/finetune/diff_128_s_p1_100kx1024.yaml
+
 
 # inference
 cd /data/FlowWorld
@@ -128,4 +155,10 @@ cd /data/FlowWorld
 conda activate dit_eval
 python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
-    /data/logs/moc/ft_did_s_100kx1024_qf1x1_img1p0_train_qf_em/did-s-2-ckpt-0100000-250-diffusion.npz
+    /data/logs/tpt/diff_s_1000kx1024_fp32/dit-s-2-ckpt-1000000-250-diffusion.npz
+
+cd /data/FlowWorld
+conda activate dit_eval
+python tools/evaluator.py \
+    /data/checkpoints/VIRTUAL_imagenet128_labeled.npz \
+    /data/logs/tad/ft_diff_128_s_p1_100kx1024/dit-s-1-ckpt-0100000-250-diffusion.npz
