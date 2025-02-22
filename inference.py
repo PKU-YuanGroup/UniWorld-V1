@@ -16,6 +16,7 @@ from diffusers.models import AutoencoderKL
 from diffusion import create_diffusion
 from transport import create_transport, Sampler
 from models import Models
+from tokenizer import VAE_Models
 from datasets.img_latent_dataset import ImgLatentDataset
 from tools.save_npz import create_npz_from_sample_folder
 
@@ -127,7 +128,8 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         )
     
     if vae is None:
-        vae = AutoencoderKL.from_pretrained(train_config['vae']['model_path']).to(device)
+        # vae = AutoencoderKL.from_pretrained(train_config['vae']['model_path']).to(device)
+        vae = VAE_Models[train_config['vae']['vae_type']](train_config['vae']['model_path'])
         if accelerator.process_index == 0:
             print_with_prefix('Loaded VAE model')
     
@@ -202,8 +204,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                 else:
                     samples = sample_fn(z, model_fn, **model_kwargs)[-1]
                 samples = (samples * latent_std) / latent_multiplier + latent_mean
-                samples = vae.decode(samples).sample
-                samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+                samples = vae.decode_to_images(samples)
                 images.append(samples)
             # Combine 8 images into a 2x4 grid
             # Stack all images into a large numpy array
@@ -244,8 +245,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                 samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
 
             samples = (samples * latent_std) / latent_multiplier + latent_mean
-            samples = vae.decode(samples).sample
-            samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+            samples = vae.decode_to_images(samples)
 
             # Save samples to disk as individual .png files
             for i, sample in enumerate(samples):
@@ -342,10 +342,10 @@ if __name__ == "__main__":
             fid_reference_file = train_config['data']['fid_reference_file']
             fid = calculate_fid_given_paths(
                 [fid_reference_file, sample_folder_dir],
-                batch_size=50,
+                batch_size=200,
                 dims=2048,
                 device='cuda',
-                num_workers=8,
+                num_workers=16,
                 sp_len = train_config['sample']['fid_num']
             )
             print_with_prefix('fid=',fid)

@@ -17,7 +17,8 @@ data:
 
 # recommend to use default settings (we wil release codes with SD-VAE later)
 vae:
-  model_path: '/data/checkpoints/stabilityai/sd-vae-ft-ema'
+  vae_type: 'sdvae'
+  model_path: '/data/checkpoints/stabilityai/sd-vae-ft-ema/vae-ft-ema-560000-ema-pruned.safetensors'
   downsample_ratio: 8
 
 # recommend to use default settings
@@ -71,7 +72,7 @@ transport:
 # recommend to use default settings
 sample:
   num_sampling_steps: 250
-  cfg_scale: 1.5
+  cfg_scale: 1.0
   # recommend to use default settings
   per_proc_batch_size: 64
   fid_num: 50000

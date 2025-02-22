@@ -84,7 +84,7 @@ class ImgLatentDataset(Dataset):
             labels = f.get_slice('labels')
             feature = features[img_idx:img_idx+1]
             label = labels[img_idx:img_idx+1]
-            if 'paths' in f.keys() and self.raw_img_transform is not None:
+            if 'paths' in f.keys() and (self.raw_img_transform is not None) and (self.raw_data_dir is not None):
                 paths = f.get_slice('paths')
                 path_tensor = paths[img_idx:img_idx+1].squeeze(0)
                 path = "".join(map(chr, path_tensor.tolist())).rstrip("\x00")
@@ -111,11 +111,13 @@ if __name__ == "__main__":
     from diffusers import AutoencoderKL
     from torchvision.utils import save_image
     import sys
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-    
-    from tools.extract_features import center_crop_arr
     from torchvision import transforms
     from torchvision.datasets import ImageFolder
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from tokenizer import VAE_Models
+    from tools.extract_features import center_crop_arr
+
+
     crop_size = 256
     transform = transforms.Compose([
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
@@ -123,26 +125,23 @@ if __name__ == "__main__":
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
     ])
     
-    # data_dir = r'/data/checkpoints/LanguageBind/offline_feature/offline_eqvae_256/imagenet_train_256'
-    # vae = r"/data/checkpoints/zelaki/eq-vae-ema"
-    data_dir = r'/data/checkpoints/LanguageBind/offline_feature/offline_vae_256_path/imagenet_train_256'
-    raw_data_dir = r'/data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/val'
-    vae = r"/data/checkpoints/stabilityai/sd-vae-ft-ema"
-    dataset = ImgLatentDataset(data_dir, latent_norm=True, raw_data_dir=raw_data_dir, raw_img_transform=transform)
+    data_dir = '/data/checkpoints/LanguageBind/offline_feature/offline_sdvae_256_path/imagenet_train_256'
+    vae_type, vae_path = 'sdvae', "/data/checkpoints/stabilityai/sd-vae-ft-ema/vae-ft-ema-560000-ema-pruned.safetensors"
+    # data_dir = '/data/checkpoints/LanguageBind/offline_feature/offline_vavae_256_path/imagenet_train_256'
+    # vae_type, vae_path = 'vavae', "/data/checkpoints/hustvl/vavae-imagenet256-f16d32-dinov2/vavae-imagenet256-f16d32-dinov2.pt"
+    raw_data_dir = None
+    dataset = ImgLatentDataset(data_dir, latent_norm=False, raw_data_dir=raw_data_dir, raw_img_transform=transform)
     print(dataset.get_latent_stats())
     num_sample_to_vis = 4
-    # samples = torch.stack([dataset.__getitem__(i)[0] for i in range(num_sample_to_vis)]).cuda()
-    # vae = AutoencoderKL.from_pretrained(vae).cuda()
-    
-    # std = dataset._latent_std.to(samples.device)
-    # mean = dataset._latent_mean.to(samples.device)
-    # samples = samples * std + mean
-    # samples = vae.decode(samples).sample
-    # save_image(samples, "check.png", nrow=4, normalize=True, value_range=(-1, 1))
+    samples = torch.stack([dataset.__getitem__(i)[0] for i in range(num_sample_to_vis)]).cuda()
+    vae = VAE_Models[vae_type](vae_path)
+    samples = vae.model.decode(samples)
+    save_image(samples, "sdvae.png", nrow=4, normalize=True, value_range=(-1, 1))
+    # save_image(samples, "vavae.png", nrow=4, normalize=True, value_range=(-1, 1))
 
-    
-    samples = torch.stack([dataset.__getitem__(i)[2] for i in range(num_sample_to_vis)]).cuda()
-    vae = AutoencoderKL.from_pretrained(vae).cuda()
-    samples = vae.encode(samples.cuda()).latent_dist.sample()
-    samples = vae.decode(samples).sample
-    save_image(samples, "check.png", nrow=4, normalize=True, value_range=(-1, 1))
+    # for raw_data_dir is not None
+    # samples = torch.stack([dataset.__getitem__(i)[2] for i in range(num_sample_to_vis)]).cuda()
+    # samples = vae.encode_images(samples)
+    # samples = vae.model.decode(samples)
+    # save_image(samples, "sdvae_enc2dec.png", nrow=4, normalize=True, value_range=(-1, 1))
+    # save_image(samples, "vavae_enc2dec.png", nrow=4, normalize=True, value_range=(-1, 1))

@@ -23,6 +23,7 @@ from torchvision import transforms
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from datasets.img_latent_dataset import ImgLatentDataset
+from tokenizer import VAE_Models
 
 def center_crop_arr(pil_image, image_size):
     """
@@ -109,7 +110,7 @@ def main(args):
         os.makedirs(output_dir, exist_ok=True)
 
     # Create model:
-    tokenizer = AutoencoderKL.from_pretrained(args.vae).to(device)
+    tokenizer = VAE_Models[args.vae_type](args.vae_path)
 
     # Setup data:
     datasets = [
@@ -157,7 +158,7 @@ def main(args):
             path = data[2]  # (N,)
             
             x = x.to(device)
-            z = tokenizer.encode(x).latent_dist.sample().detach().cpu()  # (N, C, H, W)
+            z = tokenizer.encode_images(x).detach().cpu()  # (N, C, H, W)
 
             if batch_idx == 0 and rank == 0:
                 print('latent shape', z.shape, 'dtype', z.dtype)
@@ -235,7 +236,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default='/path/to/your/data')
     parser.add_argument("--data_split", type=str, default='imagenet_train')
     parser.add_argument("--output_path", type=str, default="/path/to/your/output")
-    parser.add_argument("--vae", type=str, default="/path/to/your/vae")
+    parser.add_argument("--vae_type", type=str, default="sdvae")
+    parser.add_argument("--vae_path", type=str, default="/path/to/your/vae")
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=40)
     parser.add_argument("--seed", type=int, default=42)

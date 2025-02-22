@@ -71,7 +71,7 @@ transport:
 # recommend to use default settings
 sample:
   num_sampling_steps: 250
-  cfg_scale: 1.5
+  cfg_scale: 1.0
   # recommend to use default settings
   per_proc_batch_size: 64
   fid_num: 50000

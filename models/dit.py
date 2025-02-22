@@ -20,10 +20,6 @@ from models.swiglu_ffn import SwiGLUFFN
 from models.pos_embed import VisionRotaryEmbeddingFast
 from models.rmsnorm import RMSNorm
 
-try:
-    from flash_attn import flash_attn_qkvpacked_func
-except:
-    flash_attn_qkvpacked_func = None
 
 @torch.compile
 def modulate(x, shift, scale):
@@ -64,7 +60,6 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         
     def forward(self, x: torch.Tensor, rope=None) -> torch.Tensor:
-        # with torch.autocast(device_type="cuda", dtype=torch.float32):
         B, N, C = x.shape
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
@@ -85,31 +80,8 @@ class Attention(nn.Module):
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
             x = attn @ v
-        x = x.transpose(1, 2).reshape(B, N, C)
-
-
-        # if flash_attn_qkvpacked_func is not None:
-        #     qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 1, 3, 4)
-        #     q, k, v = qkv.unbind(0)
-        #     q, k = self.q_norm(q), self.k_norm(k)  # (batch_size, seqlen, nheads, headdim)
             
-        #     if rope is not None:
-        #         q = rope(q)
-        #         k = rope(k)
-        #     qkv = torch.stack([q, k, v], dim=2)  # qkv: (batch_size, seqlen, 3, nheads, headdim)
-        #     ori_dtype = qkv.dtype
-        #     x = flash_attn_qkvpacked_func(
-        #         qkv.to(torch.bfloat16),
-        #         dropout_p=self.attn_drop.p if self.training else 0.0,
-        #         causal=False
-        #         ).to(ori_dtype)  # (batch_size, seqlen, nheads, headdim)
-        #     x = x.reshape(B, N, C)
-        # else:
-        #     raise NotImplementedError
-
-
-
-
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
