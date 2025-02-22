@@ -22,9 +22,11 @@ import logging
 import os
 import argparse
 from time import time
+import math
 from glob import glob
 from copy import deepcopy
 from collections import OrderedDict
+from diffusers.models import AutoencoderKL
 # local imports
 from diffusion import create_diffusion
 from models import Models
@@ -75,9 +77,12 @@ def do_train(train_config, accelerator):
         
 
     # get rank
-    rank = accelerator.local_process_index
+    rank = accelerator.local_process_index 
 
     # Create model:
+    offline_features = train_config['data']['offline_features'] if 'offline_features' in train_config['data'] else True
+    vae = None if offline_features else AutoencoderKL.from_pretrained(train_config['vae']['model_path']).to(device).eval()
+
     if 'downsample_ratio' in train_config['vae']:
         downsample_ratio = train_config['vae']['downsample_ratio']
     else:
@@ -159,11 +164,24 @@ def do_train(train_config, accelerator):
     
     # Setup data
     uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
-    dataset = ImgLatentDataset(
+    if offline_features:
+        dataset = ImgLatentDataset(
         data_dir=train_config['data']['data_path'],
         latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
         latent_multiplier=train_config['data']['latent_multiplier'], 
-    )
+    )    
+    else:
+        from tools.extract_features import center_crop_arr
+        from torchvision import transforms
+        from torchvision.datasets import ImageFolder
+        crop_size = train_config['data']['image_size']
+        transform = transforms.Compose([
+            transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+        ])
+        dataset = ImageFolder(train_config['data']['data_path'], transform=transform)
+
     batch_size_per_gpu = int(np.round(train_config['train']['global_batch_size'] / accelerator.num_processes))
     global_batch_size = batch_size_per_gpu * accelerator.num_processes
     loader = DataLoader(
@@ -209,12 +227,13 @@ def do_train(train_config, accelerator):
     log_steps = 0
     running_loss = 0
     running_grad_norm = 0
+    eval_every = train_config['train']['eval_every'] if 'eval_every' in train_config['train'] else math.inf
     start_time = time()
     if accelerator.is_main_process:
         logger.info(f"Train config: {train_config}")
 
     while True:
-        for x, y in loader:
+        for x, y, raw_img in loader:
             x = x.to(device, non_blocking=True)
             if uncondition:
                 y = (torch.ones_like(y) * train_config['data']['num_classes']).to(y.dtype)
@@ -284,6 +303,47 @@ def do_train(train_config, accelerator):
                     if accelerator.is_main_process:
                         logger.info(f"Saved checkpoint to {checkpoint_path}")
                 dist.barrier()
+
+            # Eval online or last step:
+            if (train_steps % eval_every == 0 and train_steps > 0) or train_steps == train_config['train']['max_steps']:
+                from inference import do_sample
+
+                # stored
+                temp_stored_params = [param.detach().cpu().clone() for param in model.parameters()]
+                # copy ema to model
+                for s_param, param in zip(ema.parameters(), model.parameters()):
+                    param.data.copy_(s_param.to(param.device).data)
+                # sampling without cfg
+                model.eval()
+                temp_cfg = train_config['sample']['cfg_scale']
+                train_config['sample']['cfg_scale'] = 1.0
+                with torch.no_grad():
+                    sample_folder_dir = do_sample(
+                        train_config, accelerator, ckpt_path=f"{train_steps:07d}.pt", model=model.module.module, vae=vae)
+                train_config['sample']['cfg_scale'] = temp_cfg
+                model.train()
+                # restored
+                for c_param, param in zip(temp_stored_params, model.parameters()):
+                    param.data.copy_(c_param.data)
+                temp_stored_params = None
+
+                # calculate FID
+                # Important: FID is only for reference, please use ADM evaluation for paper reporting
+                if accelerator.process_index == 0:
+                    from tools.calculate_fid import calculate_fid_given_paths
+                    logger.info(f"Calculating FID with {train_config['sample']['fid_num']} number of samples")
+                    assert 'fid_reference_file' in train_config['data'], "fid_reference_file must be specified in config"
+                    fid_reference_file = train_config['data']['fid_reference_file']
+                    fid = calculate_fid_given_paths(
+                        [fid_reference_file, sample_folder_dir],
+                        batch_size=200,
+                        dims=2048,
+                        device='cuda',
+                        num_workers=16,
+                        sp_len=train_config['sample']['fid_num']
+                    )
+                    logger.info(f"(step={train_steps:07d}), Fid={fid}")
+                    accelerator.log({"fid": fid}, step=train_steps)
 
             if train_steps >= train_config['train']['max_steps']:
                 break

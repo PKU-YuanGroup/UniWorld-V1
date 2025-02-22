@@ -99,12 +99,6 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         downsample_ratio = 16
     latent_size = train_config['data']['image_size'] // downsample_ratio
 
-    checkpoint = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
-    if "ema" in checkpoint:  # supports checkpoints from train.py
-        checkpoint = checkpoint["ema"]
-    model.load_state_dict(checkpoint)
-    model.eval()  # important!
-    model.to(device)
 
     if use_diffusion:
         diffusion = create_diffusion(
@@ -132,9 +126,10 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
             timestep_shift=timestep_shift,
         )
     
-    vae = AutoencoderKL.from_pretrained(train_config['vae']['model_path']).to(device)
-    if accelerator.process_index == 0:
-        print_with_prefix('Loaded VAE model')
+    if vae is None:
+        vae = AutoencoderKL.from_pretrained(train_config['vae']['model_path']).to(device)
+        if accelerator.process_index == 0:
+            print_with_prefix('Loaded VAE model')
     
     using_cfg = cfg_scale > 1.0
     if using_cfg:
@@ -326,6 +321,13 @@ if __name__ == "__main__":
             )
             )
     model = Models[train_config['model']['model_type']](**kwargs)
+
+    checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
+    if "ema" in checkpoint:  # supports checkpoints from train.py
+        checkpoint = checkpoint["ema"]
+    model.load_state_dict(checkpoint)
+    model.eval()  # important!
+    model.to(accelerator.device)
 
     # naive sample
     sample_folder_dir = do_sample(train_config, accelerator, ckpt_path=ckpt_dir, model=model, demo_sample_mode=args.demo)

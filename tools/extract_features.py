@@ -60,6 +60,25 @@ def img_transform(p_hflip=0, img_size=256):
     ]
     return transforms.Compose(img_transforms)
 
+
+class ImageFolderWithPath(ImageFolder):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_len = 64
+
+    def __getitem__(self, index):
+        path = self.samples[index][0]
+        path = '/'.join(path.split('/')[-2:])
+        encoded_path = path.encode("utf-8")
+        assert len(encoded_path) < self.max_len
+        paths_tensor = torch.zeros((self.max_len, ), dtype=torch.uint8)
+        paths_tensor[:len(encoded_path)] = torch.tensor(list(encoded_path), dtype=torch.uint8)
+
+        paths_recovered = "".join(map(chr, paths_tensor.tolist())).rstrip("\x00")
+        assert paths_recovered == path
+
+        return super().__getitem__(index) + (paths_tensor, )
+    
 def main(args):
     """
     Run a tokenizer on full dataset and save the features.
@@ -94,8 +113,8 @@ def main(args):
 
     # Setup data:
     datasets = [
-        ImageFolder(args.data_path, transform=img_transform(p_hflip=0.0, img_size=args.image_size)),
-        ImageFolder(args.data_path, transform=img_transform(p_hflip=1.0, img_size=args.image_size))
+        ImageFolderWithPath(args.data_path, transform=img_transform(p_hflip=0.0, img_size=args.image_size)),
+        ImageFolderWithPath(args.data_path, transform=img_transform(p_hflip=1.0, img_size=args.image_size))
     ]
     samplers = [
         DistributedSampler(
@@ -126,14 +145,16 @@ def main(args):
     latents = []
     latents_flip = []
     labels = []
+    paths = []
     for batch_idx, batch_data in enumerate(zip(*loaders)):
         run_images += batch_data[0][0].shape[0]
         if run_images % 100 == 0 and rank == 0:
-            print(f'{datetime.now()} processing {run_images}x{world_size} of {total_data_in_loop} images')
+            print(f'{datetime.now()} processing ({run_images * world_size}) of {total_data_in_loop} images')
         
         for loader_idx, data in enumerate(batch_data):
             x = data[0]
             y = data[1]  # (N,)
+            path = data[2]  # (N,)
             
             x = x.to(device)
             z = tokenizer.encode(x).latent_dist.sample().detach().cpu()  # (N, C, H, W)
@@ -144,6 +165,7 @@ def main(args):
             if loader_idx == 0:
                 latents.append(z)
                 labels.append(y)
+                paths.append(path)
             else:
                 latents_flip.append(z)
 
@@ -151,10 +173,12 @@ def main(args):
             latents = torch.cat(latents, dim=0)
             latents_flip = torch.cat(latents_flip, dim=0)
             labels = torch.cat(labels, dim=0)
+            paths = torch.cat(paths, dim=0)
             save_dict = {
                 'latents': latents,
                 'latents_flip': latents_flip,
-                'labels': labels
+                'labels': labels,
+                'paths': paths
             }
             for key in save_dict:
                 if rank == 0:
@@ -171,6 +195,7 @@ def main(args):
             latents = []
             latents_flip = []
             labels = []
+            paths = []
             saved_files += 1
 
     # save remainder latents that are fewer than 10000 images
@@ -178,10 +203,12 @@ def main(args):
         latents = torch.cat(latents, dim=0)
         latents_flip = torch.cat(latents_flip, dim=0)
         labels = torch.cat(labels, dim=0)
+        paths = torch.cat(paths, dim=0)
         save_dict = {
             'latents': latents,
             'latents_flip': latents_flip,
-            'labels': labels
+            'labels': labels,
+            'paths': paths
         }
         for key in save_dict:
             if rank == 0:

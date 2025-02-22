@@ -20,6 +20,11 @@ from models.swiglu_ffn import SwiGLUFFN
 from models.pos_embed import VisionRotaryEmbeddingFast
 from models.rmsnorm import RMSNorm
 
+try:
+    from flash_attn import flash_attn_qkvpacked_func
+except:
+    flash_attn_qkvpacked_func = None
+
 @torch.compile
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
@@ -59,15 +64,16 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         
     def forward(self, x: torch.Tensor, rope=None) -> torch.Tensor:
+        # with torch.autocast(device_type="cuda", dtype=torch.float32):
         B, N, C = x.shape
+
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        q, k = self.q_norm(q), self.k_norm(k)
+        q, k = self.q_norm(q), self.k_norm(k)  # (batch_size, nheads, seqlen, headdim)
         
         if rope is not None:
             q = rope(q)
             k = rope(k)
-
         if self.fused_attn:
             x = F.scaled_dot_product_attention(
                 q, k, v,
@@ -79,8 +85,31 @@ class Attention(nn.Module):
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
             x = attn @ v
-
         x = x.transpose(1, 2).reshape(B, N, C)
+
+
+        # if flash_attn_qkvpacked_func is not None:
+        #     qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 1, 3, 4)
+        #     q, k, v = qkv.unbind(0)
+        #     q, k = self.q_norm(q), self.k_norm(k)  # (batch_size, seqlen, nheads, headdim)
+            
+        #     if rope is not None:
+        #         q = rope(q)
+        #         k = rope(k)
+        #     qkv = torch.stack([q, k, v], dim=2)  # qkv: (batch_size, seqlen, 3, nheads, headdim)
+        #     ori_dtype = qkv.dtype
+        #     x = flash_attn_qkvpacked_func(
+        #         qkv.to(torch.bfloat16),
+        #         dropout_p=self.attn_drop.p if self.training else 0.0,
+        #         causal=False
+        #         ).to(ori_dtype)  # (batch_size, seqlen, nheads, headdim)
+        #     x = x.reshape(B, N, C)
+        # else:
+        #     raise NotImplementedError
+
+
+
+
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -287,7 +316,6 @@ class DiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
-        self.return_features = kwargs.pop('return_features', False)
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
@@ -383,19 +411,16 @@ class DiT(nn.Module):
         y = self.y_embedder(y, self.training)    # (N, D)
         c = t + y                                # (N, D)
         
-        features = [t, y, c, torch.mean(x, dim=1)]
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
                 x = checkpoint(block, x, c, self.feat_rope, use_reentrant=True)
             else:
                 x = block(x, c, self.feat_rope)
-            if self.return_features:
-                features.append(torch.mean(x, dim=1))
 
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
-        return x, features
+        return x
 
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=None, cfg_interval_start=None):
         """
@@ -404,7 +429,7 @@ class DiT(nn.Module):
         # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
-        model_out = self.forward(combined, t, y)[0]
+        model_out = self.forward(combined, t, y)
         # For exact reproducibility reasons, we apply classifier-free guidance on only
         # three channels by default. The standard approach to cfg applies it to all channels.
         # This can be done by uncommenting the following line and commenting-out the line following that.

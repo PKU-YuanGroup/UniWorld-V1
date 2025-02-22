@@ -12,13 +12,16 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset
 from safetensors import safe_open
+from PIL import Image
 
 
 class ImgLatentDataset(Dataset):
-    def __init__(self, data_dir, latent_norm=True, latent_multiplier=1.0):
+    def __init__(self, data_dir, latent_norm=True, latent_multiplier=1.0, raw_data_dir=None, raw_img_transform=None):
         self.data_dir = data_dir
         self.latent_norm = latent_norm
         self.latent_multiplier = latent_multiplier
+        self.raw_data_dir = raw_data_dir
+        self.raw_img_transform = raw_img_transform
 
         self.files = sorted(glob(os.path.join(data_dir, "*.safetensors")))
         self.img_to_file_map = self.get_img_to_safefile_map()
@@ -75,11 +78,23 @@ class ImgLatentDataset(Dataset):
         img_info = self.img_to_file_map[idx]
         safe_file, img_idx = img_info['safe_file'], img_info['idx_in_file']
         with safe_open(safe_file, framework="pt", device="cpu") as f:
-            tensor_key = "latents" if np.random.uniform(0, 1) > 0.5 else "latents_flip"
+            no_flip = np.random.uniform(0, 1) > 0.5
+            tensor_key = "latents" if no_flip else "latents_flip"
             features = f.get_slice(tensor_key)
             labels = f.get_slice('labels')
             feature = features[img_idx:img_idx+1]
             label = labels[img_idx:img_idx+1]
+            if 'paths' in f.keys() and self.raw_img_transform is not None:
+                paths = f.get_slice('paths')
+                path_tensor = paths[img_idx:img_idx+1].squeeze(0)
+                path = "".join(map(chr, path_tensor.tolist())).rstrip("\x00")
+                path = os.path.join(self.raw_data_dir, path)
+                assert os.path.exists(path)
+                with open(path, "rb") as f:
+                    image = Image.open(f).convert("RGB")
+                image_tensor = self.raw_img_transform(image)
+            else:
+                image_tensor = torch.tensor(0)
 
         if self.latent_norm:
             feature = (feature - self._latent_mean) / self._latent_std
@@ -88,22 +103,46 @@ class ImgLatentDataset(Dataset):
         # remove the first batch dimension (=1) kept by get_slice()
         feature = feature.squeeze(0)
         label = label.squeeze(0)
-        return feature, label
+        return feature, label, image_tensor
     
 
 
 if __name__ == "__main__":
     from diffusers import AutoencoderKL
     from torchvision.utils import save_image
-    data_dir = r'/mnt/workspace/lb/offline_vae_256/imagenet_train_256'
-    vae = r"/mnt/workspace/lb/checkpoint/stabilityai/sd-vae-ft-ema"
-    dataset = ImgLatentDataset(data_dir, latent_norm=True)
-    num_sample_to_vis = 4
-    samples = torch.stack([dataset.__getitem__(i)[0] for i in range(num_sample_to_vis)]).cuda()
-    vae = AutoencoderKL.from_pretrained(vae).cuda()
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     
-    std = dataset._latent_std.to(samples.device)
-    mean = dataset._latent_mean.to(samples.device)
-    samples = samples * std + mean
+    from tools.extract_features import center_crop_arr
+    from torchvision import transforms
+    from torchvision.datasets import ImageFolder
+    crop_size = 256
+    transform = transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+    
+    # data_dir = r'/data/checkpoints/LanguageBind/offline_feature/offline_eqvae_256/imagenet_train_256'
+    # vae = r"/data/checkpoints/zelaki/eq-vae-ema"
+    data_dir = r'/data/checkpoints/LanguageBind/offline_feature/offline_vae_256_path/imagenet_train_256'
+    raw_data_dir = r'/data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/val'
+    vae = r"/data/checkpoints/stabilityai/sd-vae-ft-ema"
+    dataset = ImgLatentDataset(data_dir, latent_norm=True, raw_data_dir=raw_data_dir, raw_img_transform=transform)
+    print(dataset.get_latent_stats())
+    num_sample_to_vis = 4
+    # samples = torch.stack([dataset.__getitem__(i)[0] for i in range(num_sample_to_vis)]).cuda()
+    # vae = AutoencoderKL.from_pretrained(vae).cuda()
+    
+    # std = dataset._latent_std.to(samples.device)
+    # mean = dataset._latent_mean.to(samples.device)
+    # samples = samples * std + mean
+    # samples = vae.decode(samples).sample
+    # save_image(samples, "check.png", nrow=4, normalize=True, value_range=(-1, 1))
+
+    
+    samples = torch.stack([dataset.__getitem__(i)[2] for i in range(num_sample_to_vis)]).cuda()
+    vae = AutoencoderKL.from_pretrained(vae).cuda()
+    samples = vae.encode(samples.cuda()).latent_dist.sample()
     samples = vae.decode(samples).sample
     save_image(samples, "check.png", nrow=4, normalize=True, value_range=(-1, 1))

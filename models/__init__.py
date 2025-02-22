@@ -6,7 +6,5 @@
 # LightningDiT: https://github.com/hustvl/LightningDiT
 # --------------------------------------------------------
 from .dit import DiT_models
-from .tad import TAD_models
 Models = {}
 Models.update(DiT_models)
-Models.update(TAD_models)
