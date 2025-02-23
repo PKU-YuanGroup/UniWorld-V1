@@ -26,10 +26,10 @@ import math
 from glob import glob
 from copy import deepcopy
 from collections import OrderedDict
-from diffusers.models import AutoencoderKL
 # local imports
 from diffusion import create_diffusion
 from models import Models
+from tokenizers import VAE_Models
 from transport import create_transport
 from accelerate import Accelerator
 from datasets.img_latent_dataset import ImgLatentDataset
@@ -81,7 +81,7 @@ def do_train(train_config, accelerator):
 
     # Create model:
     offline_features = train_config['data']['offline_features'] if 'offline_features' in train_config['data'] else True
-    vae = None if offline_features else AutoencoderKL.from_pretrained(train_config['vae']['model_path']).to(device).eval()
+    vae = None if offline_features else VAE_Models[train_config['vae']['vae_type']](train_config['vae']['model_path']).eval()
 
     if 'downsample_ratio' in train_config['vae']:
         downsample_ratio = train_config['vae']['downsample_ratio']
@@ -164,11 +164,21 @@ def do_train(train_config, accelerator):
     
     # Setup data
     uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
+    raw_data_dir = train_config['data']['raw_data_dir'] if 'raw_data_dir' in train_config['data'] else None
     if offline_features:
+        from tools.extract_features import center_crop_arr
+        from torchvision import transforms
+        raw_img_transform = transforms.Compose([
+            transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+        ])
         dataset = ImgLatentDataset(
         data_dir=train_config['data']['data_path'],
         latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
         latent_multiplier=train_config['data']['latent_multiplier'], 
+        raw_data_dir=raw_data_dir, 
+        raw_img_transform=raw_img_transform if raw_data_dir is not None else None
     )    
     else:
         from tools.extract_features import center_crop_arr
@@ -238,7 +248,7 @@ def do_train(train_config, accelerator):
             if uncondition:
                 y = (torch.ones_like(y) * train_config['data']['num_classes']).to(y.dtype)
             y = y.to(device, non_blocking=True)  
-            model_kwargs = dict(y=y, clean_x=x)
+            model_kwargs = dict(y=y)
             if use_diffusion:
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)

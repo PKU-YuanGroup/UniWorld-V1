@@ -20,13 +20,16 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler
-from tools.calculate_fid import calculate_fid_given_paths
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from torchmetrics import StructuralSimilarityIndexMeasure
-from models.lpips import LPIPS
 from torchvision.datasets import ImageFolder
 from torchvision import transforms
-from diffusers.models import AutoencoderKL
+
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from models.lpips import LPIPS
+from tools.calculate_fid import calculate_fid_given_paths
+from tokenizer import VAE_Models
 
 def print_with_prefix(content, prefix='Tokenizer Evaluation', rank=0):
     if rank == 0:
@@ -35,24 +38,19 @@ def print_with_prefix(content, prefix='Tokenizer Evaluation', rank=0):
 def save_image(image, filename):
     Image.fromarray(image).save(filename)
 
-def evaluate_tokenizer(config_path, model_type, data_path, output_path):
+def evaluate_tokenizer(ckpt_path, model_type, data_path, output_path, seed=42):
     # Initialize distributed training
     dist.init_process_group(backend='nccl')
     local_rank = torch.distributed.get_rank()
+    seed = seed + local_rank
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
+    torch.manual_seed(seed)
 
     # Load model
     if local_rank == 0:
         print_with_prefix("Loading model...")
-    if model_type == 'vavae':
-        from tokenizer.vavae import VA_VAE
-        model = VA_VAE(config_path).load().model
-    elif model_type == 'sdvae':
-        model = AutoencoderKL.from_pretrained("path/to/your/sd-vae-ft-ema").to(device)
-    elif model_type == 'marvae':
-        from tokenizer.marvae import MAR_VAE
-        model = MAR_VAE().load().model
+    model = VAE_Models[model_type](ckpt_path).load().model
 
     # Image preprocessing
     transform = transforms.Compose([
@@ -67,15 +65,15 @@ def evaluate_tokenizer(config_path, model_type, data_path, output_path):
     distributed_sampler = DistributedSampler(dataset, num_replicas=dist.get_world_size(), rank=local_rank)
     val_dataloader = DataLoader(
         dataset,
-        batch_size=8,
+        batch_size=32,
         shuffle=False,
-        num_workers=4,
+        num_workers=16,
         sampler=distributed_sampler
     )
 
     # Setup output directories
     folder_name = {
-        'vavae': os.path.splitext(os.path.basename(config_path))[0],
+        'vavae': 'vavae',
         'sdvae': 'sdvae',
         'marvae': 'marvae'
     }[model_type]
@@ -100,7 +98,7 @@ def evaluate_tokenizer(config_path, model_type, data_path, output_path):
                 Image.fromarray(img).save(os.path.join(ref_path, f"ref_image_rank_{local_rank}_{total_samples}.png"))
                 total_samples += 1
                 if total_samples % 100 == 0 and local_rank == 0:
-                    print_with_prefix(f"Rank {local_rank}, Saved {total_samples} reference images")
+                    print_with_prefix(f"Saved {total_samples * dist.get_world_size()} reference images")
     dist.barrier()
 
     # Initialize metrics
@@ -121,7 +119,7 @@ def evaluate_tokenizer(config_path, model_type, data_path, output_path):
             decoded_images_tensor = {
                 'vavae': lambda: model.decode(latents),
                 'marvae': lambda: model.decode(latents),
-                'sdvae': lambda: model.decode(latents).sample
+                'sdvae': lambda: model.decode(latents)
             }[model_type]()
             
             decoded_images = torch.clamp(127.5 * decoded_images_tensor + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
@@ -134,7 +132,7 @@ def evaluate_tokenizer(config_path, model_type, data_path, output_path):
         for i, img in enumerate(decoded_images):
             save_image(img, os.path.join(save_dir, f"decoded_image_rank_{local_rank}_{all_indices + i}.png"))
             if (all_indices + i) % 100 == 0 and local_rank == 0:
-                print_with_prefix(f"Rank {local_rank}, Processed {all_indices + i} images")
+                print_with_prefix(f"Processed {(all_indices + i) * dist.get_world_size()} images")
         all_indices += len(decoded_images)
     dist.barrier()
 
@@ -171,7 +169,7 @@ def encode_images(model, images, model_type='vavae'):
         posterior = {
             'vavae': lambda: model.encode(images),
             'marvae': lambda: model.encode(images),
-            'sdvae': lambda: model.encode(images).latent_dist
+            'sdvae': lambda: model.encode(images)
         }[model_type]()
         return posterior.sample().to(torch.float32)
 
@@ -212,10 +210,10 @@ def calculate_psnr_between_folders(original_folder, processed_folder):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config_path', type=str, default='tokenizer/configs/vavae_f16d32.yaml')
+    parser.add_argument('--ckpt_path', type=str, default='path/to/your/ckpt')
     parser.add_argument('--model_type', type=str, default='vavae')
     parser.add_argument('--data_path', type=str, default='/path/to/your/imagenet/ILSVRC2012_validation/data')
     parser.add_argument('--output_path', type=str, default='/path/to/your/output')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
-    evaluate_tokenizer(config_path=args.config_path, model_type=args.model_type, data_path=args.data_path, output_path=args.output_path)
+    evaluate_tokenizer(ckpt_path=args.ckpt_path, model_type=args.model_type, data_path=args.data_path, output_path=args.output_path, seed=args.seed)

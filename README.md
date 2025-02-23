@@ -39,7 +39,9 @@ torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
 
 # train
 
-## single node
+
+## diffusion model
+### single node
 
 ```
 cd /data/FlowWorld
@@ -54,7 +56,7 @@ accelerate launch \
     --config configs/qiff_s_1000kx1024_qknorm_q1.yaml
 ```
 
-## multi node
+### multi node
 
 ```
 cd /data/FlowWorld
@@ -74,7 +76,38 @@ accelerate launch \
     --config configs/flow_s_1000kx1024_sdvae.yaml
 ```
 
+## tokenizer
 
+```
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1236 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    train_flowvae.py \
+    --config configs/flowvavae_50kx512_init.yaml
+```
+
+```
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp5.yaml \
+    --machine_rank 0 \
+    train_flowvae.py \
+    --config configs/flowvavae_50kx512.yaml
+
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp5.yaml \
+    --machine_rank 1 \
+    train_flowvae.py \
+    --config configs/flowvavae_50kx512.yaml
+```
 
 # inference
 
@@ -90,7 +123,22 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/diff_s_1000kx1024_qknorm.yaml \
+    --config configs/flow_s_1000kx1024_sdvae.yaml \
+    --demo 
+```
+
+### flowvae
+```
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1234 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    evaluate_flowvae.py \
+    --config configs/flowvavae_50kx512.yaml \
     --demo 
 ```
 
@@ -107,11 +155,11 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/diff_s_1000kx1024_qknorm.yaml
+    --config configs/flow_s_1000kx1024_sdvae.yaml
 ```
 
 
-# evaluator
+# eval model
 
 ## prepare env
 
@@ -133,4 +181,40 @@ python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
     /data/logs/tpt/diff_s_1000kx1024_fp32/dit-s-2-ckpt-1000000-250-diffusion.npz
 
+```
+
+
+# eval tokenizer
+```
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1234 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    tools/evaluate_tokenizer.py \
+    --ckpt_path /data/checkpoints/hustvl/vavae-imagenet256-f16d32-dinov2/vavae-imagenet256-f16d32-dinov2.pt \
+    --model_type vavae \
+    --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/val \
+    --output_path /data/logs/flow/vavae
+    
+```
+
+```
+cd /data/FlowWorld
+conda activate dit
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1234 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    tools/evaluate_tokenizer.py \
+    --ckpt_path /data/checkpoints/stabilityai/sd-vae-ft-ema/vae-ft-ema-560000-ema-pruned.safetensors \
+    --model_type sdvae \
+    --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/val \
+    --output_path /data/logs/flow/sdvae
+    
 ```

@@ -453,7 +453,7 @@ class AutoencoderKL(nn.Module):
     def __init__(self, embed_dim, ch_mult, use_variational=True, ckpt_path=None, model_type='vavae'):
         super().__init__()
         self.encoder = Encoder(ch_mult=ch_mult, z_channels=embed_dim)
-        if model_type == 'vavae':
+        if model_type == 'vavae' or model_type == 'sdvae':
             self.decoder = Decoder(ch_mult=ch_mult, z_channels=embed_dim, attn_resolutions=(16,))
         elif model_type == 'marvae':
             self.decoder = Decoder(ch_mult=ch_mult, z_channels=embed_dim, attn_resolutions=())
@@ -468,16 +468,15 @@ class AutoencoderKL(nn.Module):
 
     def init_from_ckpt(self, path):
         if self.model_type == 'vavae':
-            if path.endswith('.safetensors'):
-                from safetensors.torch import load_file
-                sd = load_file(path)
-                self.load_state_dict(sd, strict=False)
-            else:
-                sd = torch.load(path, map_location="cpu")
-                if 'state_dict' in sd.keys():
-                    sd = sd['state_dict']
-                sd = {k: v for k, v in sd.items() if 'foundation_model.model' and 'loss' not in k}
-                self.load_state_dict(sd, strict=False)
+            sd = torch.load(path, map_location="cpu")
+            if 'state_dict' in sd.keys():
+                sd = sd['state_dict']
+            sd = {k: v for k, v in sd.items() if 'foundation_model.model' and 'loss' not in k}
+            self.load_state_dict(sd, strict=False)
+        elif self.model_type == 'sdvae':
+            from safetensors.torch import load_file
+            sd = load_file(path)
+            self.load_state_dict(sd, strict=False)
         elif self.model_type == 'marvae':
             sd = torch.load(path, map_location="cpu")["model"]
             self.load_state_dict(sd, strict=False)

@@ -26,18 +26,17 @@ import math
 from glob import glob
 from copy import deepcopy
 from collections import OrderedDict
-from diffusers.models import AutoencoderKL
 # local imports
-from diffusion import create_diffusion
-from models import Models
 from transport import create_transport
+from tokenizer import VAE_Models
 from accelerate import Accelerator
 from datasets.img_latent_dataset import ImgLatentDataset
 
 def load_weights_with_shape_check(model, checkpoint, rank=0):
     model_state_dict = model.state_dict()
     # check shape and load weights
-    for name, param in checkpoint['model'].items():
+    checkpoint = checkpoint['model'] if 'model' in checkpoint else checkpoint
+    for name, param in checkpoint.items():
         if name in model_state_dict:
             if param.shape == model_state_dict[name].shape:
                 model_state_dict[name].copy_(param)
@@ -81,40 +80,33 @@ def do_train(train_config, accelerator):
 
     # Create model:
     offline_features = train_config['data']['offline_features'] if 'offline_features' in train_config['data'] else True
-    vae = None if offline_features else AutoencoderKL.from_pretrained(train_config['vae']['model_path']).to(device).eval()
 
-    if 'downsample_ratio' in train_config['vae']:
-        downsample_ratio = train_config['vae']['downsample_ratio']
-    else:
-        downsample_ratio = 8
-    assert train_config['data']['image_size'] % downsample_ratio == 0, "Image size must be divisible by 8 (for the VAE encoder)."
-    latent_size = train_config['data']['image_size'] // downsample_ratio
-    use_diffusion = train_config['scheduler']['diffusion'] if 'diffusion' in train_config['scheduler'] else False
-    use_transport = train_config['scheduler']['transport'] if 'transport' in train_config['scheduler'] else False
-    assert (use_diffusion ^ use_transport), "use_diffusion and use_transport must be different (one True, one False)"
     kwargs = dict(
-        input_size=latent_size,
-        num_classes=train_config['data']['num_classes'],
-        use_qknorm=train_config['model']['use_qknorm'],
-        use_swiglu=train_config['model']['use_swiglu'] if 'use_swiglu' in train_config['model'] else False,
-        use_rope=train_config['model']['use_rope'] if 'use_rope' in train_config['model'] else False,
-        use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
-        in_channels=train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4,
-        use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
-        learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
+        input_size=train_config['data']['image_size'],
+        train_decoder=train_config['vae']['train_decoder'] if 'train_decoder' in train_config['vae'] else True,
+        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'groupnorm',
+        ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else False,
     )
-    if 'decoder' in train_config['model']:
-        kwargs.update(dict(decoder=train_config['model']['decoder']))
-    model = Models[train_config['model']['model_type']](**kwargs)
+    model = VAE_Models[train_config['vae']['vae_type']](**kwargs)
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     # load pretrained model
     if 'weight_init' in train_config['train']:
-        checkpoint = torch.load(train_config['train']['weight_init'], map_location=lambda storage, loc: storage)
-        # remove the prefix 'module.' from the keys
-        checkpoint['model'] = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}
-        model = load_weights_with_shape_check(model, checkpoint, rank=rank)
-        ema = load_weights_with_shape_check(ema, checkpoint, rank=rank)
+        if model.model_type == 'vavae':
+            sd = torch.load(train_config['train']['weight_init'], map_location="cpu")
+            if 'state_dict' in sd.keys():
+                sd = sd['state_dict']
+            sd = {k: v for k, v in sd.items() if 'foundation_model.model' not in k and 'loss' not in k}
+        elif model.model_type == 'sdvae':
+            from safetensors.torch import load_file
+            sd = load_file(train_config['train']['weight_init'])
+        elif model.model_type == 'marvae':
+            sd = torch.load(train_config['train']['weight_init'], map_location="cpu")["model"]
+        else:
+            raise ValueError(f"Invalid model type: {model.model_type}")
+
+        model = load_weights_with_shape_check(model, sd, rank=rank)
+        ema = load_weights_with_shape_check(ema, sd, rank=rank)
         if accelerator.is_main_process:
             logger.info(f"Loaded pretrained model from {train_config['train']['weight_init']}")
 
@@ -130,27 +122,20 @@ def do_train(train_config, accelerator):
     
     model = DDP(model.to(device), device_ids=[device])
 
-    if use_diffusion:
-        diffusion = create_diffusion(
-            timestep_respacing="", 
-            learn_sigma=train_config['diffusion']['learn_sigma'], 
-            diffusion_steps=train_config['diffusion']['diffusion_steps'], 
-            )  # default: 1000 steps, linear noise schedule
-    else:
-        transport = create_transport(
-            train_config['transport']['path_type'],
-            train_config['transport']['prediction'],
-            train_config['transport']['loss_weight'],
-            train_config['transport']['train_eps'],
-            train_config['transport']['sample_eps'],
-            use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
-            use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
-        )  # default: velocity; 
+    transport = create_transport(
+        train_config['transport']['path_type'],
+        train_config['transport']['prediction'],
+        train_config['transport']['loss_weight'],
+        train_config['transport']['train_eps'],
+        train_config['transport']['sample_eps'],
+        use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
+        use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
+    )  # default: velocity; 
 
     if accelerator.is_main_process:
         logger.info(f"Model: {model}")
-        logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-        logger.info(f"DiT Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M")
+        logger.info(f"FlowVAE Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+        logger.info(f"FlowVAE Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M")
         logger.info(f"Optimizer: AdamW, lr={train_config['optimizer']['lr']}, beta2={train_config['optimizer']['beta2']}")
         for name, param in model.named_parameters():
             logger.info(f"{name+'.requires_grad':<60}: {param.requires_grad}")
@@ -164,17 +149,27 @@ def do_train(train_config, accelerator):
     
     # Setup data
     uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
+    raw_data_dir = train_config['data']['raw_data_dir'] if 'raw_data_dir' in train_config['data'] else None
+    crop_size = train_config['data']['image_size']
     if offline_features:
+        from tools.extract_features import center_crop_arr
+        from torchvision import transforms
+        raw_img_transform = transforms.Compose([
+            transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+        ])
         dataset = ImgLatentDataset(
         data_dir=train_config['data']['data_path'],
         latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
         latent_multiplier=train_config['data']['latent_multiplier'], 
+        raw_data_dir=raw_data_dir, 
+        raw_img_transform=raw_img_transform if raw_data_dir is not None else None
     )    
     else:
         from tools.extract_features import center_crop_arr
         from torchvision import transforms
         from torchvision.datasets import ImageFolder
-        crop_size = train_config['data']['image_size']
         transform = transforms.Compose([
             transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
             transforms.ToTensor(),
@@ -233,24 +228,17 @@ def do_train(train_config, accelerator):
         logger.info(f"Train config: {train_config}")
 
     while True:
-        for x, y, raw_img in loader:
-            x = x.to(device, non_blocking=True)
-            if uncondition:
-                y = (torch.ones_like(y) * train_config['data']['num_classes']).to(y.dtype)
-            y = y.to(device, non_blocking=True)  
-            model_kwargs = dict(y=y, clean_x=x)
-            if use_diffusion:
-                t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                loss = loss_dict["loss"].mean()
+        for latent, label, raw_img in loader:
+            x = raw_img.to(device, non_blocking=True)
+            y = latent.to(device, non_blocking=True)  
+            model_kwargs = dict(y=y)
+            loss_dict = transport.training_losses(model, x, model_kwargs)
+            
+            if 'cos_loss' in loss_dict:
+                mse_loss = loss_dict["loss"].mean()
+                loss = loss_dict["cos_loss"].mean() + mse_loss
             else:
-                loss_dict = transport.training_losses(model, x, model_kwargs)
-                
-                if 'cos_loss' in loss_dict:
-                    mse_loss = loss_dict["loss"].mean()
-                    loss = loss_dict["cos_loss"].mean() + mse_loss
-                else:
-                    loss = loss_dict["loss"].mean()
+                loss = loss_dict["loss"].mean()
             opt.zero_grad()
             accelerator.backward(loss)
             if 'max_grad_norm' in train_config['optimizer']:
@@ -305,7 +293,8 @@ def do_train(train_config, accelerator):
                 dist.barrier()
 
             # Eval online or last step:
-            if (train_steps % eval_every == 0 and train_steps > 0) or train_steps == train_config['train']['max_steps']:
+            # if (train_steps % eval_every == 0 and train_steps > 0) or train_steps == train_config['train']['max_steps']:
+            if (train_steps % eval_every == 0 and train_steps > 0):
                 from inference import do_sample
 
                 # stored
@@ -408,7 +397,7 @@ def set_seed(seed, rank, device_specific=True):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark = True
 
 if __name__ == "__main__":
     # read config

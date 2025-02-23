@@ -17,7 +17,7 @@ data:
 
 # recommend to use default settings (we wil release codes with SD-VAE later)
 vae:
-  model_type: 'sdvae'
+  vae_type: 'sdvae'
   model_path: '/data/checkpoints/stabilityai/sd-vae-ft-ema/vae-ft-ema-560000-ema-pruned.safetensors'
   downsample_ratio: 8
 

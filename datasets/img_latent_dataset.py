@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import Dataset
 from safetensors import safe_open
 from PIL import Image
+from torchvision.transforms import functional as F
 
 
 class ImgLatentDataset(Dataset):
@@ -93,6 +94,10 @@ class ImgLatentDataset(Dataset):
                 with open(path, "rb") as f:
                     image = Image.open(f).convert("RGB")
                 image_tensor = self.raw_img_transform(image)
+                if not no_flip:
+                    image_tensor = F.hflip(image_tensor)
+                if np.random.uniform(0, 1) > 0.9: # 0.1 cfg
+                    image_tensor = torch.zeros_like(image_tensor)
             else:
                 image_tensor = torch.tensor(0)
 

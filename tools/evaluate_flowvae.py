@@ -11,7 +11,11 @@ from time import strftime
 from PIL import Image
 from tqdm import tqdm
 from accelerate import Accelerator
-from diffusers.models import AutoencoderKL
+from torchvision import transforms
+from torch.utils.data import DataLoader, DistributedSampler
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from torchmetrics import StructuralSimilarityIndexMeasure
+from torchvision.datasets import ImageFolder
 # local imports
 from diffusion import create_diffusion
 from transport import create_transport, Sampler
@@ -19,40 +23,26 @@ from models import Models
 from tokenizer import VAE_Models
 from datasets.img_latent_dataset import ImgLatentDataset
 from tools.save_npz import create_npz_from_sample_folder
-
-
+    
 # sample function
-def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=None, vae=None, demo_sample_mode=False):
+def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=None, demo_sample_mode=False):
     """
     Run sampling.
     """
-    use_diffusion = train_config['scheduler']['diffusion'] if 'diffusion' in train_config['scheduler'] else False
-    use_transport = train_config['scheduler']['transport'] if 'transport' in train_config['scheduler'] else False
-    assert (use_diffusion ^ use_transport), "use_diffusion and use_transport must be different (one True, one False)"
-
-
     folder_name = f"{train_config['model']['model_type'].replace('/', '-')}-ckpt-{ckpt_path.split('/')[-1].split('.')[0]}-{train_config['sample']['num_sampling_steps']}".lower()
-    folder_name += f"-diffusion" if use_diffusion else f"-transport"
 
     if cfg_scale is None:
         cfg_scale = train_config['sample']['cfg_scale']
     cfg_interval_start = train_config['sample']['cfg_interval_start'] if 'cfg_interval_start' in train_config['sample'] else 0
-    if use_diffusion:
-        cfg_interval_start = cfg_interval_start * train_config['diffusion']['diffusion_steps']
-    if use_transport:
-        timestep_shift = train_config['sample']['timestep_shift'] if 'timestep_shift' in train_config['sample'] else 0
+    timestep_shift = train_config['sample']['timestep_shift'] if 'timestep_shift' in train_config['sample'] else 0
     if cfg_scale > 1.0:
         folder_name += f"-interval{cfg_interval_start:.2f}"+f"-cfg{cfg_scale:.2f}"
-        if use_transport:
-            folder_name += f"-shift{timestep_shift:.2f}"
+        folder_name += f"-shift{timestep_shift:.2f}"
 
     if demo_sample_mode:
         cfg_interval_start = 0
         timestep_shift = 0
-        cfg_scale = 4.0
-        # cfg_scale = 1.0
-        if use_transport:
-            cfg_scale = 4.0
+        cfg_scale = 1.0
 
     output_dir = train_config['train']['output_dir']
     sample_folder_dir = os.path.join(output_dir, folder_name)
@@ -62,8 +52,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         print_with_prefix('ckpt_path=', ckpt_path)
         print_with_prefix('cfg_scale=', cfg_scale)
         print_with_prefix('cfg_interval_start=', cfg_interval_start)
-        if use_transport:
-            print_with_prefix('timestep_shift=', timestep_shift)
+        print_with_prefix('timestep_shift=', timestep_shift)
 
     if not os.path.exists(sample_folder_dir):
         if accelerator.process_index == 0:
@@ -101,36 +90,24 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     latent_size = train_config['data']['image_size'] // downsample_ratio
 
 
-    if use_diffusion:
-        diffusion = create_diffusion(
-            timestep_respacing=str(train_config['sample']['num_sampling_steps']), 
-            learn_sigma=train_config['diffusion']['learn_sigma'], 
-            )  # default: 1000 steps, linear noise schedule
-        sample_fn = diffusion.p_sample_loop
-    else:
-        transport = create_transport(
-            train_config['transport']['path_type'],
-            train_config['transport']['prediction'],
-            train_config['transport']['loss_weight'],
-            train_config['transport']['train_eps'],
-            train_config['transport']['sample_eps'],
-            use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
-            use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
-        )  # default: velocity;
-        sampler = Sampler(transport)
-        sample_fn = sampler.sample_ode(
-            sampling_method=train_config['sample']['sampling_method'],
-            num_steps=train_config['sample']['num_sampling_steps'],
-            atol=train_config['sample']['atol'],
-            rtol=train_config['sample']['rtol'],
-            reverse=train_config['sample']['reverse'],
-            timestep_shift=timestep_shift,
-        )
-    
-    if vae is None:
-        vae = VAE_Models[train_config['vae']['vae_type']](train_config['vae']['model_path'])
-        if accelerator.process_index == 0:
-            print_with_prefix('Loaded VAE model')
+    transport = create_transport(
+        train_config['transport']['path_type'],
+        train_config['transport']['prediction'],
+        train_config['transport']['loss_weight'],
+        train_config['transport']['train_eps'],
+        train_config['transport']['sample_eps'],
+        use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
+        use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
+    )  # default: velocity;
+    sampler = Sampler(transport)
+    sample_fn = sampler.sample_ode(
+        sampling_method=train_config['sample']['sampling_method'],
+        num_steps=train_config['sample']['num_sampling_steps'],
+        atol=train_config['sample']['atol'],
+        rtol=train_config['sample']['rtol'],
+        reverse=train_config['sample']['reverse'],
+        timestep_shift=timestep_shift,
+    )
     
     using_cfg = cfg_scale > 1.0
     if using_cfg:
@@ -162,8 +139,9 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         pbar = tqdm(pbar) if rank == 0 else pbar
     total = 0
     
+    # ---------get latent info-----------------------
     latent_norm = train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False
-    dataset = ImgLatentDataset(
+    latent_dataset = ImgLatentDataset(
         data_dir=train_config['data']['data_path'],
         latent_norm=latent_norm,
         latent_multiplier=train_config['data']['latent_multiplier'] if 'latent_multiplier' in train_config['data'] else 0.18215,
@@ -171,12 +149,37 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     latent_multiplier = train_config['data']['latent_multiplier'] if 'latent_multiplier' in train_config['data'] else 0.18215
     # move to device
     if latent_norm:
-        latent_mean, latent_std = dataset.get_latent_stats()
+        latent_mean, latent_std = latent_dataset.get_latent_stats()
     else:
         latent_mean, latent_std = torch.tensor(0.0), torch.tensor(1.0)
     latent_mean = latent_mean.clone().detach().to(device)
     latent_std = latent_std.clone().detach().to(device)
-    
+    # ---------------------------------------------------
+
+    # Image preprocessing
+    image_size = train_config['data']['image_size']
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Resize(image_size),
+        transforms.CenterCrop(image_size),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
+
+    # Create dataset and dataloader
+    dataset = ImageFolder(root=train_config['data']['raw_data_dir'], transform=transform)
+    distributed_sampler = DistributedSampler(dataset, num_replicas=accelerator.num_processes, rank=rank)
+    val_dataloader = DataLoader(
+        dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=16,
+        sampler=distributed_sampler
+    )
+
+    from tokenizer import VA_VAE
+    vae = VA_VAE('/data/checkpoints/hustvl/vavae-imagenet256-f16d32-dinov2/vavae-imagenet256-f16d32-dinov2.pt')
+    vae.load()
+
     if accelerator.process_index == 0:
         print_with_prefix(f"Latent mean: {latent_mean}")
         print_with_prefix(f"Latent std: {latent_std}")
@@ -185,32 +188,32 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     if demo_sample_mode:
         if accelerator.process_index == 0:
             images = []
-            for label in tqdm([207, 360, 387, 974, 88, 979, 417, 279], desc="Generating Demo Samples"):
-            # for label in tqdm([207, 360, 387, 974, 88, 979, 417, 1000], desc="Generating Demo Samples"):
-                z = torch.randn(1, model.in_channels, latent_size, latent_size, device=device)
-                y = torch.tensor([label], device=device)
+            for i in tqdm([2070, 3600, 3870, 9740, 880, 9790, 4170, 2790], desc="Generating Demo Samples"):
+                img = dataset.__getitem__(i)[0].unsqueeze(0).to(device)
+                # y = model.encode(img).sample()
+                # import ipdb;ipdb.set_trace()
+                y = vae.model.encode(img).sample()
+                y = (y - latent_mean) / latent_std * latent_multiplier
+                z = torch.randn(1, 3, image_size, image_size, device=device)
                 if using_cfg:
                     z = torch.cat([z, z], 0)
-                    y_null = torch.tensor([1000] * 1, device=device)
+                    y_null = torch.zeros_like(y, device=device)
                     y = torch.cat([y, y_null], 0)
                     model_kwargs = dict(y=y, cfg_scale=cfg_scale, cfg_interval=False, cfg_interval_start=cfg_interval_start)
                     model_fn = model.forward_with_cfg
                 else:
                     model_kwargs = dict(y=y)
                     model_fn = model.forward
-                if use_diffusion:
-                    samples = sample_fn(model_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device)
-                else:
-                    samples = sample_fn(z, model_fn, **model_kwargs)[-1]
-                samples = (samples * latent_std) / latent_multiplier + latent_mean
-                samples = vae.decode_to_images(samples)
+                samples = sample_fn(z, model_fn, **model_kwargs)[-1]
+                samples = torch.cat([samples[:1], img], dim=0)
+                samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
                 images.append(samples)
-            # Combine 8 images into a 2x4 grid
+            # Combine 8 images into a 4x4 grid
             # Stack all images into a large numpy array
-            all_images = np.stack([img[0] for img in images])  # Take first image from each batch            
-            # Rearrange into 2x4 grid
+            all_images = np.concatenate(images)  # Take first image from each batch            
+            # Rearrange into 4x4 grid
             h, w = all_images.shape[1:3]
-            grid = np.zeros((2 * h, 4 * w, 3), dtype=np.uint8)
+            grid = np.zeros((4 * h, 4 * w, 3), dtype=np.uint8)
             for idx, image in enumerate(all_images):
                 i, j = divmod(idx, 4)  # Calculate position in 2x4 grid
                 grid[i*h:(i+1)*h, j*w:(j+1)*w] = image
@@ -236,10 +239,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                 model_kwargs = dict(y=y)
                 model_fn = model.forward
 
-            if use_diffusion:
-                samples = sample_fn(model_fn, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device)
-            else:
-                samples = sample_fn(z, model_fn, **model_kwargs)[-1]
+            samples = sample_fn(z, model_fn, **model_kwargs)[-1]
             if using_cfg:
                 samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
 
@@ -290,26 +290,21 @@ if __name__ == "__main__":
     else:
         latent_size = train_config['data']['image_size'] // 8
 
-    use_diffusion = train_config['scheduler']['diffusion'] if 'diffusion' in train_config['scheduler'] else False
-    use_transport = train_config['scheduler']['transport'] if 'transport' in train_config['scheduler'] else False
-    assert (use_diffusion ^ use_transport), "use_diffusion and use_transport must be different (one True, one False)"
     # get model
     kwargs = dict(
-        input_size=latent_size,
-        num_classes=train_config['data']['num_classes'],
-        use_qknorm=train_config['model']['use_qknorm'],
-        use_swiglu=train_config['model']['use_swiglu'] if 'use_swiglu' in train_config['model'] else False,
-        use_rope=train_config['model']['use_rope'] if 'use_rope' in train_config['model'] else False,
-        use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
-        in_channels=train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4,
-        use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
-        learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
+        input_size=train_config['data']['image_size'],
+        train_decoder=train_config['vae']['train_decoder'] if 'train_decoder' in train_config['vae'] else True,
+        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'groupnorm',
+        ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else None,
     )
-    model = Models[train_config['model']['model_type']](**kwargs)
+    model = VAE_Models[train_config['vae']['vae_type']](**kwargs)
 
     checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
-    if "ema" in checkpoint:  # supports checkpoints from train.py
-        checkpoint = checkpoint["ema"]
+    # if "ema" in checkpoint:  # supports checkpoints from train.py
+    #     checkpoint = checkpoint["ema"]
+    if "model" in checkpoint:  # supports checkpoints from train.py
+        checkpoint = checkpoint["model"]
+        checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
     model.load_state_dict(checkpoint)
     model.eval()  # important!
     model.to(accelerator.device)

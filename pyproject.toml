@@ -16,7 +16,8 @@ dependencies = [
     "einops==0.7.0", "matplotlib==3.7.5", "numpy==1.24.4", "ipdb==0.13.13", 
     "omegaconf==2.1.1", "pandas==2.0.3", "pillow==10.2.0", "torchdiffeq==0.2.3", 
     "PyYAML==6.0.2", "timm==0.9.16", "wandb==0.16.3", "tensorboard==2.14.0", 
-    "torch==2.6.0", "torchvision==0.21.0", "deepspeed==0.15.1", "protobuf==3.20.0"
+    "torch==2.6.0", "torchvision==0.21.0", "deepspeed==0.15.1", "protobuf==3.20.0", 
+    "lightning-utilities==0.12.0", "torchmetrics==1.6", 
 ]
 
 [project.urls]

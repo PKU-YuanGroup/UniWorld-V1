@@ -15,7 +15,6 @@ import argparse
 import os
 from safetensors.torch import save_file
 from datetime import datetime
-from diffusers.models import AutoencoderKL
 import torch
 import numpy as np
 from PIL import Image
