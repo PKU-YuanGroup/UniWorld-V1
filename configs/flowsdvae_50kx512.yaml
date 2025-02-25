@@ -1,7 +1,7 @@
 # we recommend to read config_details.yaml first.
 
 
-ckpt_path: '/data/logs/flow/flowsdvae_50kx512/checkpoints/0050000.pt' # <---- download our pre-trained dit or your own checkpoint
+ckpt_path: '/data/logs/flow/flowsdvae_50kx512/checkpoints/0045000.pt' # <---- download our pre-trained dit or your own checkpoint
 
 data:
   raw_data_dir: '/data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/train'
@@ -71,8 +71,9 @@ transport:
   loss_weight: null
   sample_eps: null
   train_eps: null
-  use_cosine_loss: true
+  use_cosine_loss: false
   use_lognorm: true
+  l2_loss: true
 
 # recommend to use default settings
 sample:
@@ -82,7 +83,7 @@ sample:
   rtol: 0.001
   reverse: false
   likelihood: false
-  num_sampling_steps: 4
+  num_sampling_steps: 100
   cfg_scale: 1.0
   # recommend to use default settings
   per_proc_batch_size: 64

@@ -1,7 +1,7 @@
 # we recommend to read config_details.yaml first.
 
 
-ckpt_path: '/data/logs/flow/flowsdvae_50kx512_bilinear/checkpoints/0045000.pt' # <---- download our pre-trained dit or your own checkpoint
+ckpt_path: '/data/logs/flow/flowsdvae_50kx512_l1/checkpoints/0045000.pt' # <---- download our pre-trained dit or your own checkpoint
 
 data:
   raw_data_dir: '/data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/train'
@@ -25,7 +25,6 @@ vae:
   multi_latent: false
   add_y_to_x: false
   norm_type: 'rmsnorm'
-  upsampler: 'bilinear'
 
 # recommend to use default settings
 model:
@@ -42,7 +41,7 @@ train:
   max_steps: 50000
   global_batch_size: 512
   global_seed: 0
-  output_dir: '../logs/flow/flowsdvae_50kx512_bilinear'
+  output_dir: '../logs/flow/flowsdvae_50kx512_l1'
   ckpt: null
   log_every: 50
   ckpt_every: 5000
@@ -54,7 +53,7 @@ optimizer:
   beta2: 0.95
 wandb:
   proj_name: 'flow'
-  log_name: 'flowsdvae_50kx512_bilinear'
+  log_name: 'flowsdvae_50kx512_l1'
   key: '953e958793b218efb850fa194e85843e2c3bd88b'
 
 scheduler:
@@ -72,8 +71,9 @@ transport:
   loss_weight: null
   sample_eps: null
   train_eps: null
-  use_cosine_loss: true
+  use_cosine_loss: false
   use_lognorm: true
+  l2_loss: false
 
 # recommend to use default settings
 sample:
@@ -83,7 +83,7 @@ sample:
   rtol: 0.001
   reverse: false
   likelihood: false
-  num_sampling_steps: 25
+  num_sampling_steps: 100
   cfg_scale: 1.0
   # recommend to use default settings
   per_proc_batch_size: 64

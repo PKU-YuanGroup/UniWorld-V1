@@ -238,7 +238,7 @@ def do_train(train_config, accelerator):
             model_kwargs = dict(y=y)
             loss_dict = transport.training_losses(
                 model, x, model_kwargs, 
-                init_std=train_config['transport']['init_std'] if 'init_std' in train_config['transport'] else 1.0
+                l2_loss=train_config['transport']['l2_loss'] if 'l2_loss' in train_config['transport'] else True
                 )
             
             if 'cos_loss' in loss_dict:

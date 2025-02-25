@@ -88,7 +88,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train_flowvae.py \
-    --config configs/mmflowsdvae_100kx1024_cfg0p1.yaml
+    --config configs/flowsdvae_50kx512_std0p01.yaml
 ```
 
 ```
@@ -138,7 +138,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     tools/evaluate_flowvae.py \
-    --config configs/mmflowsdvae_100kx1024_cfg0p1.yaml \
+    --config configs/flowsdvae_50kx512_zero.yaml \
     --demo 
 ```
 
