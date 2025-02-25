@@ -17,6 +17,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from torchmetrics import StructuralSimilarityIndexMeasure
 from torchvision.datasets import ImageFolder
 # local imports
+
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from diffusion import create_diffusion
 from transport import create_transport, Sampler
 from models import Models
@@ -176,25 +179,20 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         sampler=distributed_sampler
     )
 
-    from tokenizer import VA_VAE
-    vae = VA_VAE('/data/checkpoints/hustvl/vavae-imagenet256-f16d32-dinov2/vavae-imagenet256-f16d32-dinov2.pt')
-    vae.load()
-
     if accelerator.process_index == 0:
         print_with_prefix(f"Latent mean: {latent_mean}")
         print_with_prefix(f"Latent std: {latent_std}")
         print_with_prefix(f"Latent multiplier: {latent_multiplier}")
 
+    init_std = train_config['transport']['init_std'] if 'init_std' in train_config['transport'] else 1.0
     if demo_sample_mode:
         if accelerator.process_index == 0:
             images = []
             for i in tqdm([2070, 3600, 3870, 9740, 880, 9790, 4170, 2790], desc="Generating Demo Samples"):
                 img = dataset.__getitem__(i)[0].unsqueeze(0).to(device)
-                # y = model.encode(img).sample()
-                # import ipdb;ipdb.set_trace()
-                y = vae.model.encode(img).sample()
-                y = (y - latent_mean) / latent_std * latent_multiplier
-                z = torch.randn(1, 3, image_size, image_size, device=device)
+                y_ = model.encode(img).sample()
+                y = (y_ - latent_mean) / latent_std * latent_multiplier
+                z = torch.randn(1, 3, image_size, image_size, device=device) * init_std
                 if using_cfg:
                     z = torch.cat([z, z], 0)
                     y_null = torch.zeros_like(y, device=device)
@@ -205,21 +203,21 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                     model_kwargs = dict(y=y)
                     model_fn = model.forward
                 samples = sample_fn(z, model_fn, **model_kwargs)[-1]
-                samples = torch.cat([samples[:1], img], dim=0)
+                samples = torch.cat([samples[:1], img, model.decode(y_)], dim=0)
                 samples = torch.clamp(127.5 * samples + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
                 images.append(samples)
-            # Combine 8 images into a 4x4 grid
+            # Combine 8 images into a 6x4 grid
             # Stack all images into a large numpy array
             all_images = np.concatenate(images)  # Take first image from each batch            
-            # Rearrange into 4x4 grid
+            # Rearrange into 6x4 grid
             h, w = all_images.shape[1:3]
-            grid = np.zeros((4 * h, 4 * w, 3), dtype=np.uint8)
+            grid = np.zeros((4 * h, 6 * w, 3), dtype=np.uint8)
             for idx, image in enumerate(all_images):
-                i, j = divmod(idx, 4)  # Calculate position in 2x4 grid
+                i, j = divmod(idx, 6)  # Calculate position in 4x6 grid
                 grid[i*h:(i+1)*h, j*w:(j+1)*w] = image
                 
             # Save the combined image
-            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_samples.png")
+            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_samples_cfg{cfg_scale}.png")
 
             return None
     else:
@@ -293,9 +291,11 @@ if __name__ == "__main__":
     # get model
     kwargs = dict(
         input_size=train_config['data']['image_size'],
-        train_decoder=train_config['vae']['train_decoder'] if 'train_decoder' in train_config['vae'] else True,
-        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'groupnorm',
-        ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else None,
+        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'rmsnorm',
+        multi_latent=train_config['vae']['multi_latent'] if 'multi_latent' in train_config['vae'] else True,
+        add_y_to_x=train_config['vae']['add_y_to_x'] if 'add_y_to_x' in train_config['vae'] else False,
+        ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else False,
+        sample_mode=True, 
     )
     model = VAE_Models[train_config['vae']['vae_type']](**kwargs)
 
@@ -305,7 +305,7 @@ if __name__ == "__main__":
     if "model" in checkpoint:  # supports checkpoints from train.py
         checkpoint = checkpoint["model"]
         checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
-    model.load_state_dict(checkpoint)
+    model.load_state_dict(checkpoint, strict=False)
     model.eval()  # important!
     model.to(accelerator.device)
 

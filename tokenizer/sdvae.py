@@ -39,7 +39,8 @@ class SD_VAE:
         self.model = AutoencoderKL(
             embed_dim=self.embed_dim,
             ch_mult=(1, 2, 4, 4),
-            ckpt_path=self.ckpt_path
+            ckpt_path=self.ckpt_path, 
+            model_type='sdvae', 
         ).cuda().eval()
         return self
     

@@ -88,25 +88,25 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train_flowvae.py \
-    --config configs/flowvavae_50kx512_init.yaml
+    --config configs/mmflowsdvae_100kx1024_cfg0p1.yaml
 ```
 
 ```
 cd /data/FlowWorld
 conda activate dit
 accelerate launch \
-    --config_file configs/accelerate_configs/multi_node_example_by_ddp5.yaml \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 0 \
     train_flowvae.py \
-    --config configs/flowvavae_50kx512.yaml
+    --config configs/flowsdvae_50kx512_rmsnorm_nocfg_nomulti_nocos.yaml
 
 cd /data/FlowWorld
 conda activate dit
 accelerate launch \
-    --config_file configs/accelerate_configs/multi_node_example_by_ddp5.yaml \
+    --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 1 \
     train_flowvae.py \
-    --config configs/flowvavae_50kx512.yaml
+    --config configs/flowsdvae_50kx512_rmsnorm_nocfg_nomulti_nocos.yaml
 ```
 
 # inference
@@ -137,8 +137,8 @@ accelerate launch \
     --machine_rank 0 \
     --num_processes 8 \
     --num_machines 1 \
-    evaluate_flowvae.py \
-    --config configs/flowvavae_50kx512.yaml \
+    tools/evaluate_flowvae.py \
+    --config configs/mmflowsdvae_100kx1024_cfg0p1.yaml \
     --demo 
 ```
 

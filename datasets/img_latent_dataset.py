@@ -17,12 +17,21 @@ from torchvision.transforms import functional as F
 
 
 class ImgLatentDataset(Dataset):
-    def __init__(self, data_dir, latent_norm=True, latent_multiplier=1.0, raw_data_dir=None, raw_img_transform=None):
+    def __init__(
+            self, 
+            data_dir, 
+            latent_norm=True, 
+            latent_multiplier=1.0, 
+            raw_data_dir=None, 
+            raw_img_transform=None, 
+            raw_img_drop=0.0, 
+            ):
         self.data_dir = data_dir
         self.latent_norm = latent_norm
         self.latent_multiplier = latent_multiplier
         self.raw_data_dir = raw_data_dir
         self.raw_img_transform = raw_img_transform
+        self.raw_img_drop = raw_img_drop
 
         self.files = sorted(glob(os.path.join(data_dir, "*.safetensors")))
         self.img_to_file_map = self.get_img_to_safefile_map()
@@ -96,7 +105,7 @@ class ImgLatentDataset(Dataset):
                 image_tensor = self.raw_img_transform(image)
                 if not no_flip:
                     image_tensor = F.hflip(image_tensor)
-                if np.random.uniform(0, 1) > 0.9: # 0.1 cfg
+                if np.random.uniform(0, 1) < self.raw_img_drop: # 0.1 cfg
                     image_tensor = torch.zeros_like(image_tensor)
             else:
                 image_tensor = torch.tensor(0)

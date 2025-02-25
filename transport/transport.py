@@ -133,13 +133,12 @@ class Transport:
         samples = samples[:target_size]
         return th.tensor(samples)
 
-    def sample(self, x1, sp_timesteps=None, shifted_mu=0):
+    def sample(self, x1, sp_timesteps=None, shifted_mu=0, init_std=1.0):
         """Sampling x0 & t based on shape of x1 (if needed)
           Args:
             x1 - data point; [batch, *dim]
         """
-        
-        x0 = th.randn_like(x1)
+        x0 = th.randn_like(x1) * init_std
         t0, t1 = self.check_interval(self.train_eps, self.sample_eps)
         if not self.use_lognorm:
             if self.partitial_train is not None and th.rand(1) < self.partial_ratio:
@@ -173,6 +172,7 @@ class Transport:
         model_kwargs=None,
         sp_timesteps=None,
         shifted_mu=0,
+        init_std=1.0
     ):
         """Loss for training the score model
         Args:
@@ -183,7 +183,7 @@ class Transport:
         if model_kwargs == None:
             model_kwargs = {}
         
-        t, x0, x1 = self.sample(x1, sp_timesteps, shifted_mu)
+        t, x0, x1 = self.sample(x1, sp_timesteps, shifted_mu, init_std=init_std)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
         B, *_, C = xt.shape

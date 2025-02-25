@@ -5,10 +5,14 @@ from tqdm import tqdm
 import numpy as np
 import torch.nn as nn
 from PIL import Image
-from torchvision import transforms
 from timm.models.vision_transformer import PatchEmbed, Mlp
 from einops import rearrange
 import torch.nn.functional as F
+
+
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
+from autoencoder import DiagonalGaussianDistribution, Encoder, Decoder
 
 
 class TimestepEmbedder(nn.Module):
@@ -56,8 +60,10 @@ class TimestepEmbedder(nn.Module):
         return t_emb
     
 def nonlinearity(x):
+    # # swish
+    # return x * torch.sigmoid(x)
     # swish
-    return x * torch.sigmoid(x)
+    return F.silu(x)
 
 
 class GroupNorm(nn.Module):
@@ -104,43 +110,24 @@ def Normalize(in_channels, num_groups=32, norm_type="groupnorm"):
     elif norm_type == "layernorm":
         return LayerNorm(num_channels=in_channels, eps=1e-6)
     elif norm_type == "rmsnorm":
-        return LayerNorm(num_channels=in_channels, eps=1e-6)
+        return RMSNorm(num_channels=in_channels, eps=1e-6)
 
 class Upsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
+    def __init__(self, in_channels, with_conv, upsampler='nearest'):
         super().__init__()
         self.with_conv = with_conv
+        self.upsampler = upsampler
+        self.antialias = False if upsampler == 'nearest' else True
         if self.with_conv:
             self.conv = torch.nn.Conv2d(
                 in_channels, in_channels, kernel_size=3, stride=1, padding=1
             )
 
     def forward(self, x):
-        x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
+        x = torch.nn.functional.interpolate(x, scale_factor=2.0, mode=self.upsampler, antialias=self.antialias)
         if self.with_conv:
             x = self.conv(x)
         return x
-
-
-class Downsample(nn.Module):
-    def __init__(self, in_channels, with_conv):
-        super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = torch.nn.Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=2, padding=0
-            )
-
-    def forward(self, x):
-        if self.with_conv:
-            pad = (0, 1, 0, 1)
-            x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
-            x = self.conv(x)
-        else:
-            x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
-        return x
-
 
 class ResnetBlock(nn.Module):
     def __init__(
@@ -259,121 +246,7 @@ class AttnBlock(nn.Module):
         return x + h_
 
 
-class Encoder(nn.Module):
-    def __init__(
-        self,
-        *,
-        ch=128,
-        out_ch=3,
-        ch_mult=(1, 1, 2, 2, 4),
-        num_res_blocks=2,
-        attn_resolutions=(16,),
-        dropout=0.0,
-        resamp_with_conv=True,
-        in_channels=3,
-        resolution=256,
-        z_channels=16,
-        double_z=True,
-        **ignore_kwargs,
-    ):
-        super().__init__()
-        self.ch = ch
-        self.temb_ch = 0
-        self.num_resolutions = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
-
-        # downsampling
-        self.conv_in = torch.nn.Conv2d(
-            in_channels, self.ch, kernel_size=3, stride=1, padding=1
-        )
-
-        curr_res = resolution
-        in_ch_mult = (1,) + tuple(ch_mult)
-        self.down = nn.ModuleList()
-        for i_level in range(self.num_resolutions):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_in = ch * in_ch_mult[i_level]
-            block_out = ch * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks):
-                block.append(
-                    ResnetBlock(
-                        in_channels=block_in,
-                        out_channels=block_out,
-                        temb_channels=self.temb_ch,
-                        dropout=dropout,
-                    )
-                )
-                block_in = block_out
-                if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in))
-            down = nn.Module()
-            down.block = block
-            down.attn = attn
-            if i_level != self.num_resolutions - 1:
-                down.downsample = Downsample(block_in, resamp_with_conv)
-                curr_res = curr_res // 2
-            self.down.append(down)
-
-        # middle
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-        self.mid.attn_1 = AttnBlock(block_in)
-        self.mid.block_2 = ResnetBlock(
-            in_channels=block_in,
-            out_channels=block_in,
-            temb_channels=self.temb_ch,
-            dropout=dropout,
-        )
-
-        # end
-        self.norm_out = Normalize(block_in)
-        self.conv_out = torch.nn.Conv2d(
-            block_in,
-            2 * z_channels if double_z else z_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-
-    def forward(self, x):
-        # assert x.shape[2] == x.shape[3] == self.resolution, "{}, {}, {}".format(x.shape[2], x.shape[3], self.resolution)
-
-        # timestep embedding
-        temb = None
-
-        # downsampling
-        hs = [self.conv_in(x)]
-        for i_level in range(self.num_resolutions):
-            for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1], temb)
-                if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
-                hs.append(h)
-            if i_level != self.num_resolutions - 1:
-                hs.append(self.down[i_level].downsample(hs[-1]))
-
-        # middle
-        h = hs[-1]
-        h = self.mid.block_1(h, temb)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h, temb)
-
-        # end
-        h = self.norm_out(h)
-        h = nonlinearity(h)
-        h = self.conv_out(h)
-        return h
-
-
-class Decoder(nn.Module):
+class FlowDecoder(nn.Module):
     def __init__(
         self,
         *,
@@ -390,6 +263,7 @@ class Decoder(nn.Module):
         give_pre_end=False,
         temb_ch=512, 
         norm_type='groupnorm', 
+        upsampler='nearest', 
         **ignore_kwargs,
     ):
         super().__init__()
@@ -424,13 +298,15 @@ class Decoder(nn.Module):
             out_channels=block_in,
             temb_channels=self.temb_ch,
             dropout=dropout,
+            norm_type=norm_type, 
         )
-        self.mid.attn_1 = AttnBlock(block_in)
+        self.mid.attn_1 = AttnBlock(block_in, norm_type=norm_type)
         self.mid.block_2 = ResnetBlock(
             in_channels=block_in,
             out_channels=block_in,
             temb_channels=self.temb_ch,
             dropout=dropout,
+            norm_type=norm_type, 
         )
 
         # upsampling
@@ -446,16 +322,17 @@ class Decoder(nn.Module):
                         out_channels=block_out,
                         temb_channels=self.temb_ch,
                         dropout=dropout,
+                        norm_type=norm_type, 
                     )
                 )
                 block_in = block_out
                 if curr_res in attn_resolutions:
-                    attn.append(AttnBlock(block_in))
+                    attn.append(AttnBlock(block_in, norm_type=norm_type))
             up = nn.Module()
             up.block = block
             up.attn = attn
             if i_level != 0:
-                up.upsample = Upsample(block_in, resamp_with_conv)
+                up.upsample = Upsample(block_in, resamp_with_conv, upsampler)
                 curr_res = curr_res * 2
             self.up.insert(0, up)  # prepend to get consistent order
 
@@ -482,10 +359,13 @@ class Decoder(nn.Module):
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h, temb[temb_idx])
+                # print(torch.any(torch.isnan(h)), torch.max(h).item(), torch.min(h).item(), torch.mean(h).item(), torch.std(h).item())
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
+                    # print(torch.any(torch.isnan(h)), torch.max(h).item(), torch.min(h).item(), torch.mean(h).item(), torch.std(h).item())
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
+                # print(torch.any(torch.isnan(h)), torch.max(h).item(), torch.min(h).item(), torch.mean(h).item(), torch.std(h).item())
                 temb_idx += 1
 
         # end
@@ -495,77 +375,11 @@ class Decoder(nn.Module):
         h = self.norm_out(h)
         h = nonlinearity(h)
         h = self.conv_out(h)
+        # print(torch.any(torch.isnan(h)), torch.max(h).item(), torch.min(h).item(), torch.mean(h).item(), torch.std(h).item())
         return h
 
 
-class DiagonalGaussianDistribution(object):
-    def __init__(self, parameters, deterministic=False):
-        self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
-        self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
-        if self.deterministic:
-            self.var = self.std = torch.zeros_like(self.mean).to(
-                device=self.parameters.device
-            )
-
-    def sample(self):
-        x = self.mean + self.std * torch.randn(self.mean.shape).to(
-            device=self.parameters.device
-        )
-        return x
-
-    def kl(self, other=None):
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        else:
-            if other is None:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean, 2) + self.var - 1.0 - self.logvar,
-                    dim=[1, 2, 3],
-                )
-            else:
-                return 0.5 * torch.sum(
-                    torch.pow(self.mean - other.mean, 2) / other.var
-                    + self.var / other.var
-                    - 1.0
-                    - self.logvar
-                    + other.logvar,
-                    dim=[1, 2, 3],
-                )
-
-    def nll(self, sample, dims=[1, 2, 3]):
-        if self.deterministic:
-            return torch.Tensor([0.0])
-        logtwopi = np.log(2.0 * np.pi)
-        return 0.5 * torch.sum(
-            logtwopi + self.logvar + torch.pow(sample - self.mean, 2) / self.var,
-            dim=dims,
-        )
-
-    def mode(self):
-        return self.mean
-
-def load_weights_with_shape_check(model, checkpoint):
-    model_state_dict = model.state_dict()
-    # check shape and load weights
-    for name, param in checkpoint.items():
-        if name in model_state_dict:
-            if param.shape == model_state_dict[name].shape:
-                model_state_dict[name].copy_(param)
-            else:
-                print(f"Skipping loading parameter '{name}' due to shape mismatch: "
-                    f"checkpoint shape {param.shape}, model shape {model_state_dict[name].shape}")
-        else:
-            print(f"Parameter '{name}' not found in model, skipping.")
-    # load state dict
-    model.load_state_dict(model_state_dict, strict=False)
-    
-    return model
-
-class FlowAutoencoderKL(nn.Module):
+class FlowAE(nn.Module):
     def __init__(
             self, 
             embed_dim, 
@@ -573,75 +387,84 @@ class FlowAutoencoderKL(nn.Module):
             input_size=256,
             patch_size=8,
             ch=128, 
-            temb_ch=512, 
             use_variational=True, 
             ckpt_path=None, 
             model_type='vavae', 
-            train_decoder=True, 
-            norm_type='groupnorm', 
+            sample_mode=False, 
+            norm_type='rmsnorm', 
+            multi_latent=True, 
+            add_y_to_x=False, 
+            upsampler='nearest'
             ):
         super().__init__()
+        self.ch_mult = ch_mult
         self.embed_dim = embed_dim
         self.model_type = model_type
         self.use_variational = use_variational
         mult = 2 if self.use_variational else 1
-
-        # encode
-        self.encoder = Encoder(ch_mult=ch_mult, z_channels=embed_dim)
-        self.quant_conv = torch.nn.Conv2d(2 * embed_dim, mult * embed_dim, 1)
+        hidden_size = ch * ch_mult[-1]
 
         # decode
         if model_type == 'vavae' or model_type == 'sdvae':
-            self.decoder = Decoder(
+            self.flow = FlowDecoder(
                 ch=ch, ch_mult=ch_mult, z_channels=ch * ch_mult[-1], 
-                attn_resolutions=(16,), temb_ch=temb_ch, norm_type=norm_type
+                attn_resolutions=(16,), temb_ch=hidden_size, norm_type=norm_type, upsampler=upsampler
                 )
         elif model_type == 'marvae':
-            self.decoder = Decoder(
+            self.flow = FlowDecoder(
                 ch=ch, ch_mult=ch_mult, z_channels=ch * ch_mult[-1], 
-                attn_resolutions=(), temb_ch=temb_ch, norm_type=norm_type
+                attn_resolutions=(), temb_ch=hidden_size, norm_type=norm_type, upsampler=upsampler
                 )
 
         # flow
-        hidden_size = ch * ch_mult[-1]
-        self.t_embedder = TimestepEmbedder(temb_ch)
-        self.y_embedder = nn.ModuleList([
-            torch.nn.Conv2d(embed_dim, temb_ch, 1) if i == 0 else Upsample(temb_ch, with_conv=True) 
-            for i in range(len(ch_mult))
-            ])
+        self.t_embedder = TimestepEmbedder(hidden_size)
+        self.add_y_to_x = add_y_to_x
+        self.multi_latent = multi_latent
+        if self.multi_latent:
+            self.y_embedder = nn.ModuleList([
+                torch.nn.Conv2d(embed_dim, hidden_size, 1) if i == 0 else Upsample(hidden_size, with_conv=True, upsampler=upsampler) 
+                for i in range(len(ch_mult))
+                ])
+        else:
+            self.y_embedder = torch.nn.Conv2d(embed_dim, hidden_size, 1)
         self.x_embedder = PatchEmbed(input_size, patch_size, 3, hidden_size, bias=True)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
-        self.dit_initialize_weights()
+        self.initialize_weights()
 
         # init 
-        if ckpt_path is not None:
+        if ckpt_path is not None and sample_mode:
+            mult = 2 if self.use_variational else 1
+            self.encoder = Encoder(ch_mult=ch_mult, z_channels=embed_dim)
+            if model_type == 'vavae' or model_type == 'sdvae':
+                self.decoder = Decoder(ch_mult=ch_mult, z_channels=embed_dim, attn_resolutions=(16,))
+            elif model_type == 'marvae':
+                self.decoder = Decoder(ch_mult=ch_mult, z_channels=embed_dim, attn_resolutions=())
+            self.use_variational = use_variational
+            mult = 2 if self.use_variational else 1
+            self.quant_conv = torch.nn.Conv2d(2 * embed_dim, mult * embed_dim, 1)
+            self.post_quant_conv = torch.nn.Conv2d(embed_dim, embed_dim, 1)
             self.init_from_ckpt(ckpt_path)
-        
-        # freeze encode
-        self.train_decoder = train_decoder
-        self.encoder.requires_grad_(False)
-        self.quant_conv.requires_grad_(False)
 
     def init_from_ckpt(self, path):
         if self.model_type == 'vavae':
             sd = torch.load(path, map_location="cpu")
             if 'state_dict' in sd.keys():
                 sd = sd['state_dict']
-            sd = {k: v for k, v in sd.items() if 'foundation_model.model' not in k and 'loss' not in k}
-            load_weights_with_shape_check(self, sd)
+            sd = {k: v for k, v in sd.items() if 'foundation_model.model' and 'loss' not in k}
+            self.load_state_dict(sd, strict=False)
         elif self.model_type == 'sdvae':
             from safetensors.torch import load_file
             sd = load_file(path)
-            load_weights_with_shape_check(self, sd)
+            self.load_state_dict(sd, strict=False)
         elif self.model_type == 'marvae':
             sd = torch.load(path, map_location="cpu")["model"]
-            load_weights_with_shape_check(self, sd)
+            self.load_state_dict(sd, strict=False)
         else:
             raise ValueError(f"Invalid model type: {self.model_type}")
     
-    def dit_initialize_weights(self):
+    def initialize_weights(self):
 
         # Initialize (and freeze) pos_embed by sin-cos embedding:
         pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(self.x_embedder.num_patches ** 0.5))
@@ -664,22 +487,30 @@ class FlowAutoencoderKL(nn.Module):
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
 
-    def decode(self, z, t, y):
-        z = self.x_embedder(z) + self.pos_embed
-        h = w = int(z.shape[1] ** 0.5)
-        z = rearrange(z, 'b (h w) c -> b c h w', h=h, w=w).contiguous()  # B C H W
-        t = self.t_embedder(t)[:, :, None, None]    # (B, C) -> # (B, C, 1, 1)
-        c = []
-        for m in self.y_embedder:
-            y = m(y)    # B C H W -> B C 2*H 2*W -> B C 4*H 4*W
-            c.append(t + y)
-
-        dec = self.decoder(z, c) # B 3 256 256
+    def decode(self, z):
+        z = self.post_quant_conv(z)
+        dec = self.decoder(z)
         return dec
 
     @torch.compile
     def forward(self, x, t=None, y=None, **kwargs):
-        x = self.decode(x, t, y)
+        x = self.x_embedder(x) + self.pos_embed
+        h = w = int(x.shape[1] ** 0.5)
+        x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()  # B C H W
+        t = self.t_embedder(t)[:, :, None, None]    # (B, C) -> # (B, C, 1, 1)
+        c = []
+        if self.multi_latent:
+            for i, m in enumerate(self.y_embedder):
+                y = m(y)    # B C H W -> B C 2*H 2*W -> B C 4*H 4*W
+                if i == 0 and self.add_y_to_x:
+                    x = x + y
+                c.append(t + y)
+        else:
+            c = [self.y_embedder(y) if i==0 else t for i in range(len(self.ch_mult))]
+            if self.add_y_to_x:
+                x = x + c[0]
+
+        x = self.flow(x, c) # B 3 256 256
         return x    
     
     def forward_with_cfg(self, x, t, y, cfg_scale, cfg_interval=None, cfg_interval_start=None):
@@ -783,13 +614,13 @@ def center_crop_arr(pil_image, image_size):
 #################################################################################
 
 def FlowVAVAE(**kwargs):
-    return FlowAutoencoderKL(embed_dim=32, patch_size=16, ch_mult=(1, 1, 2, 2, 4), model_type='vavae', **kwargs)
+    return FlowAE(embed_dim=32, patch_size=16, ch_mult=(1, 1, 2, 2, 4), model_type='vavae', **kwargs)
 
 def FlowSDVAE(**kwargs):
-    return FlowAutoencoderKL(embed_dim=4, patch_size=8, ch_mult=(1, 2, 4, 4), model_type='sdvae', **kwargs)
+    return FlowAE(embed_dim=4, patch_size=8, ch_mult=(1, 2, 4, 4), model_type='sdvae', **kwargs)
 
 def FlowMARVAE(**kwargs):
-    return FlowAutoencoderKL(embed_dim=16, patch_size=16, ch_mult=(1, 1, 2, 2, 4), model_type='marvae', **kwargs)
+    return FlowAE(embed_dim=16, patch_size=16, ch_mult=(1, 1, 2, 2, 4), model_type='marvae', **kwargs)
 
 FlowVAE_models = {
     'FlowVAVAE':  FlowVAVAE,  'FlowSDVAE':  FlowSDVAE,  'FlowMARVAE':  FlowMARVAE,  
@@ -799,7 +630,7 @@ FlowVAE_models = {
 if __name__ == '__main__':
     import yaml
 
-    config_path = 'configs/flowvavae_s_100kx1024.yaml'
+    config_path = 'configs/flowsdvae_50kx512_bilinear.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     input_size = train_config['data']['image_size']
@@ -812,9 +643,12 @@ if __name__ == '__main__':
     in_channels = 3
     model = FlowVAE_models[train_config['vae']['vae_type']](
         input_size=train_config['data']['image_size'],
-        train_decoder=train_config['vae']['train_decoder'] if 'train_decoder' in train_config['vae'] else True,
-        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'groupnorm',
+        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'rmsnorm',
+        multi_latent=train_config['vae']['multi_latent'] if 'multi_latent' in train_config['vae'] else True,
+        add_y_to_x=train_config['vae']['add_y_to_x'] if 'add_y_to_x' in train_config['vae'] else False,
         ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else False,
+        upsampler=train_config['vae']['upsampler'] if 'upsampler' in train_config['vae'] else 'nearest',
+        sample_mode=False, 
     ).cuda()
 
     print(model)

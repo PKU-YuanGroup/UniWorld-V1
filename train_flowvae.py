@@ -83,9 +83,12 @@ def do_train(train_config, accelerator):
 
     kwargs = dict(
         input_size=train_config['data']['image_size'],
-        train_decoder=train_config['vae']['train_decoder'] if 'train_decoder' in train_config['vae'] else True,
-        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'groupnorm',
+        norm_type=train_config['vae']['norm_type'] if 'norm_type' in train_config['vae'] else 'rmsnorm',
+        multi_latent=train_config['vae']['multi_latent'] if 'multi_latent' in train_config['vae'] else True,
+        add_y_to_x=train_config['vae']['add_y_to_x'] if 'add_y_to_x' in train_config['vae'] else False,
         ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else False,
+        upsampler=train_config['vae']['upsampler'] if 'upsampler' in train_config['vae'] else 'nearest',
+        sample_mode=False, 
     )
     model = VAE_Models[train_config['vae']['vae_type']](**kwargs)
 
@@ -164,7 +167,8 @@ def do_train(train_config, accelerator):
         latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
         latent_multiplier=train_config['data']['latent_multiplier'], 
         raw_data_dir=raw_data_dir, 
-        raw_img_transform=raw_img_transform if raw_data_dir is not None else None
+        raw_img_transform=raw_img_transform if raw_data_dir is not None else None, 
+        raw_img_drop=train_config['data']['raw_img_drop'] if 'raw_img_drop' in train_config['data'] else 0.0,
     )    
     else:
         from tools.extract_features import center_crop_arr
@@ -232,7 +236,10 @@ def do_train(train_config, accelerator):
             x = raw_img.to(device, non_blocking=True)
             y = latent.to(device, non_blocking=True)  
             model_kwargs = dict(y=y)
-            loss_dict = transport.training_losses(model, x, model_kwargs)
+            loss_dict = transport.training_losses(
+                model, x, model_kwargs, 
+                init_std=train_config['transport']['init_std'] if 'init_std' in train_config['transport'] else 1.0
+                )
             
             if 'cos_loss' in loss_dict:
                 mse_loss = loss_dict["loss"].mean()

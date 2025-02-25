@@ -19,11 +19,12 @@ data:
 # recommend to use default settings (we wil release codes with SD-VAE later)
 vae:
   vae_type: 'FlowSDVAE'
-  model_path: null
+  model_path: '/data/checkpoints/stabilityai/sd-vae-ft-ema/vae-ft-ema-560000-ema-pruned.safetensors'
   downsample_ratio: 8
   # for flowvae
-  train_decoder: true
-  norm_type: 'groupnorm'
+  multi_latent: false
+  add_y_to_x: false
+  norm_type: 'rmsnorm'
 
 # recommend to use default settings
 model:
@@ -81,7 +82,7 @@ sample:
   rtol: 0.001
   reverse: false
   likelihood: false
-  num_sampling_steps: 250
+  num_sampling_steps: 4
   cfg_scale: 1.0
   # recommend to use default settings
   per_proc_batch_size: 64
