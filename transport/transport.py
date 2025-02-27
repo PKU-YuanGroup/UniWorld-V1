@@ -7,7 +7,7 @@ import enum
 from . import path
 from .utils import EasyDict, log_state, mean_flat
 from .integrators import ode, sde
-from scipy.stats import norm
+from scipy.stats import norm, beta, pareto
 
 class ModelType(enum.Enum):
     """
@@ -122,6 +122,28 @@ class Transport:
 
         return samples
 
+    def sample_beta(alpha, beta_param, size=1):
+        samples = beta.rvs(alpha, beta_param, size=size)
+        return th.tensor(samples, dtype=th.float32)
+
+    # Pareto (logit is transformed to [0,1])
+    def sample_pareto(alpha, size=1):
+        samples = pareto.rvs(alpha, size=size) - 1  # Shift to start from 0
+        samples = samples / (1 + samples)  # Logit transform to (0,1)
+        return th.tensor(samples, dtype=th.float32)
+    
+    # Cosine
+    def sample_cosine(size=1):
+        x = np.random.rand(size)
+        weights = np.cos((np.pi / 2) * x)
+        return th.tensor(np.random.choice(x, size=size, p=weights / weights.sum()), dtype=th.float32)
+    # Cubic
+
+    def sample_cubic(size=1):
+        x = np.random.rand(size)
+        weights = 1 - x**3
+        return th.tensor(np.random.choice(x, size=size, p=weights / weights.sum()), dtype=th.float32)
+
     def sample_in_range(self, mu, sigma, target_size, range_min=0, range_max=0.5):
         samples = []
         while len(samples) < target_size:
@@ -133,7 +155,10 @@ class Transport:
         samples = samples[:target_size]
         return th.tensor(samples)
 
-    def sample(self, x1, sp_timesteps=None, shifted_mu=0):
+    def sample(
+            self, x1, sp_timesteps=None, shifted_mu=0, timestep_sampling='lognorm', 
+            beta_alpha=1, beta_beta=3, pareto_alpha=1.5
+            ):
         """Sampling x0 & t based on shape of x1 (if needed)
           Args:
             x1 - data point; [batch, *dim]
@@ -141,11 +166,24 @@ class Transport:
         x0 = th.randn_like(x1)
         t0, t1 = self.check_interval(self.train_eps, self.sample_eps)
         if not self.use_lognorm:
-            if self.partitial_train is not None and th.rand(1) < self.partial_ratio:
-                t = th.rand((x1.shape[0],)) * (self.partitial_train[1] - self.partitial_train[0]) + self.partitial_train[0]
+            assert timestep_sampling != 'lognorm'
+            if timestep_sampling == 'uniform':
+                if self.partitial_train is not None and th.rand(1) < self.partial_ratio:
+                    t = th.rand((x1.shape[0],)) * (self.partitial_train[1] - self.partitial_train[0]) + self.partitial_train[0]
+                else:
+                    t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
+            elif timestep_sampling == 'beta':
+                t = self.sample_beta(beta_alpha, beta_beta, size=x1.shape[0]) * (t1 - t0) + t0
+            elif timestep_sampling == 'pareto':
+                t = self.sample_pareto(pareto_alpha, size=x1.shape[0]) * (t1 - t0) + t0
+            elif timestep_sampling == 'cosine':
+                t = self.sample_cosine(size=x1.shape[0]) * (t1 - t0) + t0
+            elif timestep_sampling == 'cubic':
+                t = self.sample_cubic(size=x1.shape[0]) * (t1 - t0) + t0
             else:
-                t = th.rand((x1.shape[0],)) * (t1 - t0) + t0
+                raise NotImplementedError(f'Not implemented timestep_sampling ({timestep_sampling})')
         else:
+            assert timestep_sampling == 'lognorm'
             # random < partial_ratio, then sample from the partial range
             if not self.shift_lg:
                 if self.partitial_train is not None and th.rand(1) < self.partial_ratio:
@@ -155,7 +193,7 @@ class Transport:
             else:
                 assert self.partitial_train is None, "Shifted lognormal distribution is not compatible with partial training"
                 t = self.sample_logit_normal(shifted_mu, 1, size=x1.shape[0]) * (t1 - t0) + t0
-        
+        # t = th.ones((x1.shape[0],)) * 0.0
         # overwrite t if sp_timesteps is provided (for validation)
         if sp_timesteps is not None:
             # uniform sampling between self.sp_timesteps[0] and self.sp_timesteps[1]
@@ -172,7 +210,11 @@ class Transport:
         model_kwargs=None,
         sp_timesteps=None,
         shifted_mu=0,
+        timestep_sampling='lognorm', 
         l2_loss=True, 
+        beta_alpha=None, 
+        beta_beta=None, 
+        pareto_alpha=None, 
     ):
         """Loss for training the score model
         Args:
@@ -183,7 +225,10 @@ class Transport:
         if model_kwargs == None:
             model_kwargs = {}
         
-        t, x0, x1 = self.sample(x1, sp_timesteps, shifted_mu)
+        t, x0, x1 = self.sample(
+            x1, sp_timesteps, shifted_mu, timestep_sampling, 
+            beta_alpha=beta_alpha, beta_beta=beta_beta, pareto_alpha=pareto_alpha
+            )
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
         B, *_, C = xt.shape
@@ -191,8 +236,12 @@ class Transport:
 
         terms = {}
         terms['pred'] = model_output
+        terms['xt'] = xt
+        terms['x1'] = x1
+        terms['x0'] = x0
+        terms['t'] = t
         if self.model_type == ModelType.VELOCITY:
-            terms['loss'] = mean_flat(((model_output - ut) ** 2))
+            terms['loss'] = mean_flat(((model_output - ut) ** 2)) if l2_loss else mean_flat((model_output - ut).abs())
             if self.use_cosine_loss:
                 terms['cos_loss'] = mean_flat(1 - th.nn.functional.cosine_similarity(model_output, ut, dim=1))
         else: 
@@ -208,9 +257,9 @@ class Transport:
                 raise NotImplementedError()
             
             if self.model_type == ModelType.NOISE:
-                terms['loss'] = mean_flat(weight * ((model_output - x0) ** 2)) if l2_loss else mean_flat(weight * ((model_output - x0)))
+                terms['loss'] = mean_flat(weight * ((model_output - x0) ** 2)) if l2_loss else mean_flat(weight * ((model_output - x0).abs()))
             else:
-                terms['loss'] = mean_flat(weight * ((model_output * sigma_t + x0) ** 2)) if l2_loss else mean_flat(weight * ((model_output * sigma_t + x0)))
+                terms['loss'] = mean_flat(weight * ((model_output * sigma_t + x0) ** 2)) if l2_loss else mean_flat(weight * ((model_output * sigma_t + x0).abs()))
                 
         return terms
     

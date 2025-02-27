@@ -299,6 +299,7 @@ class FlowDecoder(nn.Module):
             temb_channels=self.temb_ch,
             dropout=dropout,
             norm_type=norm_type, 
+            conv_shortcut=False
         )
         self.mid.attn_1 = AttnBlock(block_in, norm_type=norm_type)
         self.mid.block_2 = ResnetBlock(
@@ -307,6 +308,7 @@ class FlowDecoder(nn.Module):
             temb_channels=self.temb_ch,
             dropout=dropout,
             norm_type=norm_type, 
+            conv_shortcut=False
         )
 
         # upsampling
@@ -499,16 +501,7 @@ class FlowAE(nn.Module):
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()  # B C H W
         t = self.t_embedder(t)[:, :, None, None]    # (B, C) -> # (B, C, 1, 1)
         c = []
-        if self.multi_latent:
-            for i, m in enumerate(self.y_embedder):
-                y = m(y)    # B C H W -> B C 2*H 2*W -> B C 4*H 4*W
-                if i == 0 and self.add_y_to_x:
-                    x = x + y
-                c.append(t + y)
-        else:
-            c = [self.y_embedder(y) if i==0 else t for i in range(len(self.ch_mult))]
-            if self.add_y_to_x:
-                x = x + c[0]
+        c = [self.y_embedder(y) if i==0 else t for i in range(len(self.ch_mult))]
 
         x = self.flow(x, c) # B 3 256 256
         return x    
@@ -629,8 +622,17 @@ FlowVAE_models = {
 
 if __name__ == '__main__':
     import yaml
+    import sys
+    from torch.utils.data import DataLoader
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from tools.extract_features import center_crop_arr
+    from torchvision import transforms
+    from datasets.img_latent_dataset import ImgLatentDataset
+    from torchvision.utils import save_image
+    from models.lpips import LPIPS
+    from transport import create_transport, Sampler
 
-    config_path = 'configs/flowsdvae_50kx512_bilinear.yaml'
+    config_path = 'configs/flowsdvae_50kx512.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     input_size = train_config['data']['image_size']
@@ -648,16 +650,117 @@ if __name__ == '__main__':
         add_y_to_x=train_config['vae']['add_y_to_x'] if 'add_y_to_x' in train_config['vae'] else False,
         ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else False,
         upsampler=train_config['vae']['upsampler'] if 'upsampler' in train_config['vae'] else 'nearest',
-        sample_mode=False, 
+        sample_mode=True, 
     ).cuda()
 
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
-    bsz = 2
-    x = torch.randn(bsz, in_channels, input_size, input_size).cuda()
-    t = torch.rand(bsz).cuda()
-    y = torch.randn(bsz, model.embed_dim, latent_size, latent_size).cuda()
+    # bsz = 2
+    # x = torch.randn(bsz, in_channels, input_size, input_size).cuda()
+    # t = torch.rand(bsz).cuda()
+    # y = torch.randn(bsz, model.embed_dim, latent_size, latent_size).cuda()
 
-    logit = model(x, t, y)
-    print(logit.shape)
+    # logit = model(x, t, y)
+    # print(logit.shape)
+
+
+    ckpt_dir = train_config['ckpt_path']
+    checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
+    # if "ema" in checkpoint:  # supports checkpoints from train.py
+    #     checkpoint = checkpoint["ema"]
+    if "model" in checkpoint:  # supports checkpoints from train.py
+        checkpoint = checkpoint["model"]
+        checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
+    model.load_state_dict(checkpoint, strict=False)
+    model.eval()  # important!
+    model.cuda()
+
+    transport = create_transport(
+        train_config['flowvae_transport']['path_type'],
+        train_config['flowvae_transport']['prediction'],
+        train_config['flowvae_transport']['loss_weight'],
+        train_config['flowvae_transport']['train_eps'],
+        train_config['flowvae_transport']['sample_eps'],
+        use_cosine_loss = train_config['flowvae_transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['flowvae_transport'] else False,
+        use_lognorm = train_config['flowvae_transport']['use_lognorm'] if 'use_lognorm' in train_config['flowvae_transport'] else False,
+    )  # default: velocity; 
+
+    sampler = Sampler(transport)
+    timestep_shift = train_config['flowvae_sample']['timestep_shift'] if 'timestep_shift' in train_config['flowvae_sample'] else 0
+    sample_fn = sampler.sample_ode(
+        sampling_method=train_config['flowvae_sample']['sampling_method'],
+        # num_steps=train_config['flowvae_sample']['num_sampling_steps'] + 1,
+        num_steps=1 + 1,
+        atol=train_config['flowvae_sample']['atol'],
+        rtol=train_config['flowvae_sample']['rtol'],
+        reverse=train_config['flowvae_sample']['reverse'],
+        timestep_shift=timestep_shift,
+    )
+
+    # Setup data
+    uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
+    raw_data_dir = train_config['data']['raw_data_dir'] if 'raw_data_dir' in train_config['data'] else None
+    crop_size = train_config['data']['image_size']
+    raw_img_transform = transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+    dataset = ImgLatentDataset(
+        data_dir=train_config['data']['data_path'],
+        latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
+        latent_multiplier=train_config['data']['latent_multiplier'], 
+        raw_data_dir=raw_data_dir, 
+        raw_img_transform=raw_img_transform if raw_data_dir is not None else None, 
+        raw_img_drop=train_config['data']['raw_img_drop'] if 'raw_img_drop' in train_config['data'] else 0.0,
+    )    
+    batch_size_per_gpu = 4
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size_per_gpu,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True,
+        drop_last=True
+    )
+
+    for latent, label, raw_img in loader:
+        x = raw_img.cuda()
+        y = latent.cuda()
+        model_kwargs = dict(y=y)
+        loss_dict = transport.training_losses(
+            model, x, model_kwargs, 
+            l2_loss=train_config['flowvae_transport']['l2_loss'] if 'l2_loss' in train_config['flowvae_transport'] else True
+            )
+        xt = loss_dict['xt']
+        x1 = loss_dict['x1']
+        x0 = loss_dict['x0']
+        pred = loss_dict['pred']
+        t = loss_dict['t'][:, None, None, None]
+        x1_pred = xt + (1-t) * pred
+        print(t)
+        save_image(xt, "xt.png", nrow=4, normalize=True, value_range=(-1, 1))
+        save_image(x1, "x1.png", nrow=4, normalize=True, value_range=(-1, 1))
+        save_image(x0, "x0.png", nrow=4, normalize=True, value_range=(-1, 1))
+        save_image(x1_pred, "x1_pred.png", nrow=4, normalize=True, value_range=(-1, 1))
+
+        z = x0
+        pred_ = model(z, loss_dict['t'], y)
+        x1_pred_ = xt + (1-t) * pred
+        save_image(x1_pred_, "x1_pred_.png", nrow=4, normalize=True, value_range=(-1, 1))
+
+        # perceptual_loss = LPIPS().cuda().eval()
+        # inputs = x1
+        # reconstructions = x1_pred
+        # p_loss = perceptual_loss(inputs, reconstructions).mean()
+        # print(p_loss)
+
+
+        model_kwargs = dict(y=y)
+        model_fn = model.forward
+        samples = sample_fn(z, model_fn, **model_kwargs)[-1]
+        save_image(samples, "samples.png", nrow=4, normalize=True, value_range=(-1, 1))
+
+        import ipdb;ipdb.set_trace()
+        print(1)

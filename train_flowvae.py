@@ -124,15 +124,22 @@ def do_train(train_config, accelerator):
                     break
     
     model = DDP(model.to(device), device_ids=[device])
-
+    
+    
+    timestep_sampling = train_config['flowvae_transport']['timestep_sampling'] if 'timestep_sampling' in train_config['flowvae_transport'] else 'lognorm'
+    shift_lg = train_config['flowvae_transport']['shift_lg'] if 'shift_lg' in train_config['flowvae_transport'] else True
+    shifted_mu = train_config['flowvae_transport']['shifted_mu'] if 'shifted_mu' in train_config['flowvae_transport'] else 0.0
+    assert (timestep_sampling == 'lognorm') or ((timestep_sampling != 'lognorm') and (not shift_lg))
+    assert shift_lg or ((not shifted_mu) and (shifted_mu == 0.0))
     transport = create_transport(
-        train_config['transport']['path_type'],
-        train_config['transport']['prediction'],
-        train_config['transport']['loss_weight'],
-        train_config['transport']['train_eps'],
-        train_config['transport']['sample_eps'],
-        use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
-        use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
+        train_config['flowvae_transport']['path_type'],
+        train_config['flowvae_transport']['prediction'],
+        train_config['flowvae_transport']['loss_weight'],
+        train_config['flowvae_transport']['train_eps'],
+        train_config['flowvae_transport']['sample_eps'],
+        use_cosine_loss = train_config['flowvae_transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['flowvae_transport'] else False,
+        use_lognorm = train_config['flowvae_transport']['use_lognorm'] if 'use_lognorm' in train_config['flowvae_transport'] else False,
+        shift_lg = shift_lg, 
     )  # default: velocity; 
 
     if accelerator.is_main_process:
@@ -141,7 +148,7 @@ def do_train(train_config, accelerator):
         logger.info(f"FlowVAE Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M")
         logger.info(f"Optimizer: AdamW, lr={train_config['optimizer']['lr']}, beta2={train_config['optimizer']['beta2']}")
         for name, param in model.named_parameters():
-            logger.info(f"{name+'.requires_grad':<60}: {param.requires_grad}")
+            logger.info(f"{name+'.requires_grad':<70}: {param.requires_grad}")
 
     opt = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
@@ -226,26 +233,45 @@ def do_train(train_config, accelerator):
     log_steps = 0
     running_loss = 0
     running_grad_norm = 0
+    running_p_loss = 0
+    running_cos_loss = 0
     eval_every = train_config['train']['eval_every'] if 'eval_every' in train_config['train'] else math.inf
     start_time = time()
     if accelerator.is_main_process:
         logger.info(f"Train config: {train_config}")
 
+    lpips_weight = train_config['train']['lpips_weight'] if 'lpips_weight' in train_config['train'] else 0.0
+    if lpips_weight > 0.0:
+        from models.lpips import LPIPS
+        perceptual_loss = LPIPS().cuda().eval()
     while True:
         for latent, label, raw_img in loader:
             x = raw_img.to(device, non_blocking=True)
             y = latent.to(device, non_blocking=True)  
+            
             model_kwargs = dict(y=y)
             loss_dict = transport.training_losses(
                 model, x, model_kwargs, 
-                l2_loss=train_config['transport']['l2_loss'] if 'l2_loss' in train_config['transport'] else True
+                shifted_mu=shifted_mu, 
+                timestep_sampling=timestep_sampling, 
+                l2_loss=train_config['flowvae_transport']['l2_loss'] if 'l2_loss' in train_config['flowvae_transport'] else True, 
+                beta_alpha=train_config['flowvae_transport']['beta_alpha'] if 'beta_alpha' in train_config['flowvae_transport'] else None, 
+                beta_beta=train_config['flowvae_transport']['beta_beta'] if 'beta_beta' in train_config['flowvae_transport'] else None, 
+                pareto_alpha=train_config['flowvae_transport']['pareto_alpha'] if 'pareto_alpha' in train_config['flowvae_transport'] else None, 
                 )
             
-            if 'cos_loss' in loss_dict:
-                mse_loss = loss_dict["loss"].mean()
-                loss = loss_dict["cos_loss"].mean() + mse_loss
-            else:
-                loss = loss_dict["loss"].mean()
+            p_loss = torch.tensor(0.0)
+            if lpips_weight > 0.0:
+                xt = loss_dict['xt']
+                pred = loss_dict['pred']
+                t = loss_dict['t'][:, None, None, None]
+                x1_pred = xt + (1-t) * pred
+                p_loss = perceptual_loss(x, x1_pred).mean()
+
+            mse_loss = loss_dict["loss"].mean()
+            cos_loss = loss_dict["cos_loss"].mean() if 'cos_loss' in loss_dict else torch.tensor(0.0)
+            loss = cos_loss + mse_loss + lpips_weight * p_loss
+
             opt.zero_grad()
             accelerator.backward(loss)
             if 'max_grad_norm' in train_config['optimizer']:
@@ -256,10 +282,10 @@ def do_train(train_config, accelerator):
             update_ema(ema, model.module)
 
             # Log loss values:
-            if 'cos_loss' in loss_dict:
-                running_loss += mse_loss.item()
-            else:
-                running_loss += loss.item()
+            running_loss += mse_loss.item()
+            running_p_loss += p_loss.item()
+            running_cos_loss += cos_loss.item()
+
             log_steps += 1
             train_steps += 1
             if train_steps % train_config['train']['log_every'] == 0:
@@ -275,12 +301,28 @@ def do_train(train_config, accelerator):
                 avg_grad_norm = torch.tensor(running_grad_norm / log_steps, device=device)
                 dist.all_reduce(avg_grad_norm, op=dist.ReduceOp.SUM)
                 avg_grad_norm = avg_grad_norm.item() / dist.get_world_size()
+                # Reduce loss history over all processes:
+                avg_p_loss = torch.tensor(running_p_loss / log_steps, device=device)
+                dist.all_reduce(avg_p_loss, op=dist.ReduceOp.SUM)
+                avg_p_loss = avg_p_loss.item() / dist.get_world_size()
+                # Reduce loss history over all processes:
+                avg_cos_loss = torch.tensor(running_cos_loss / log_steps, device=device)
+                dist.all_reduce(avg_cos_loss, op=dist.ReduceOp.SUM)
+                avg_cos_loss = avg_cos_loss.item() / dist.get_world_size()
+
                 if accelerator.is_main_process:
-                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.4f}")
-                    accelerator.log({"loss": avg_loss, "grad_norm": avg_grad_norm}, step=train_steps)
+                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Perceptual Loss: {avg_p_loss:.4f}, Cos Loss: {avg_cos_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.4f}")
+                    accelerator.log(
+                        {
+                            "loss": avg_loss, "grad_norm": avg_grad_norm, 
+                            'p_loss': avg_p_loss, 'cos_loss': avg_cos_loss
+                        } , step=train_steps
+                        )
                 # Reset monitoring variables:
                 running_loss = 0
                 running_grad_norm = 0
+                running_p_loss = 0
+                running_cos_loss = 0
                 log_steps = 0
                 start_time = time()
 
@@ -302,7 +344,7 @@ def do_train(train_config, accelerator):
             # Eval online or last step:
             # if (train_steps % eval_every == 0 and train_steps > 0) or train_steps == train_config['train']['max_steps']:
             if (train_steps % eval_every == 0 and train_steps > 0):
-                from inference import do_sample
+                from tools.evaluate_flowvae import do_sample
 
                 # stored
                 temp_stored_params = [param.detach().cpu().clone() for param in model.parameters()]
@@ -311,35 +353,32 @@ def do_train(train_config, accelerator):
                     param.data.copy_(s_param.to(param.device).data)
                 # sampling without cfg
                 model.eval()
-                temp_cfg = train_config['sample']['cfg_scale']
-                train_config['sample']['cfg_scale'] = 1.0
+                temp_cfg = train_config['flowvae_sample']['cfg_scale']
+                train_config['flowvae_sample']['cfg_scale'] = 1.0
                 with torch.no_grad():
-                    sample_folder_dir = do_sample(
+                    torch.cuda.empty_cache()
+                    vae = VAE_Models[train_config['vae']['vae_type'][4:].lower()](train_config['vae']['model_path'])
+                    vae.model = vae.model.eval()
+                    fid, avg_psnr, avg_lpips, avg_ssim = do_sample(
                         train_config, accelerator, ckpt_path=f"{train_steps:07d}.pt", model=model.module.module, vae=vae)
-                train_config['sample']['cfg_scale'] = temp_cfg
+                    del vae
+                    torch.cuda.empty_cache()
+                train_config['flowvae_sample']['cfg_scale'] = temp_cfg
                 model.train()
                 # restored
                 for c_param, param in zip(temp_stored_params, model.parameters()):
                     param.data.copy_(c_param.data)
                 temp_stored_params = None
 
-                # calculate FID
-                # Important: FID is only for reference, please use ADM evaluation for paper reporting
+                # calculate metrics
                 if accelerator.process_index == 0:
-                    from tools.calculate_fid import calculate_fid_given_paths
-                    logger.info(f"Calculating FID with {train_config['sample']['fid_num']} number of samples")
-                    assert 'fid_reference_file' in train_config['data'], "fid_reference_file must be specified in config"
-                    fid_reference_file = train_config['data']['fid_reference_file']
-                    fid = calculate_fid_given_paths(
-                        [fid_reference_file, sample_folder_dir],
-                        batch_size=200,
-                        dims=2048,
-                        device='cuda',
-                        num_workers=16,
-                        sp_len=train_config['sample']['fid_num']
-                    )
-                    logger.info(f"(step={train_steps:07d}), Fid={fid}")
-                    accelerator.log({"fid": fid}, step=train_steps)
+                    logger.info(f"(step={train_steps:07d}), Fid={fid}, PSNR={avg_psnr}, LPIPS={avg_lpips}, SSIM={avg_ssim}")
+                    accelerator.log(
+                        {
+                            "fid": fid, "psnr": avg_psnr, 
+                            "lpips": avg_lpips, "ssim": avg_ssim
+                        }, step=train_steps
+                        )
 
             if train_steps >= train_config['train']['max_steps']:
                 break

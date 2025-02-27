@@ -29,7 +29,7 @@ from collections import OrderedDict
 # local imports
 from diffusion import create_diffusion
 from models import Models
-from tokenizers import VAE_Models
+from tokenizer import VAE_Models
 from transport import create_transport
 from accelerate import Accelerator
 from datasets.img_latent_dataset import ImgLatentDataset

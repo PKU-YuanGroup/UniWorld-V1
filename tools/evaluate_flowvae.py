@@ -10,6 +10,7 @@ import os, math, argparse, yaml, torch, numpy as np
 from time import strftime
 from PIL import Image
 from tqdm import tqdm
+import torch.distributed as dist
 from accelerate import Accelerator
 from torchvision import transforms
 from torch.utils.data import DataLoader, DistributedSampler
@@ -20,27 +21,30 @@ from torchvision.datasets import ImageFolder
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from diffusion import create_diffusion
+from models.lpips import LPIPS
+from tools.calculate_fid import calculate_fid_given_paths
 from transport import create_transport, Sampler
-from models import Models
 from tokenizer import VAE_Models
 from datasets.img_latent_dataset import ImgLatentDataset
-from tools.save_npz import create_npz_from_sample_folder
-    
+
+def save_image(image, filename):
+    Image.fromarray(image).save(filename)
+
 # sample function
-def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=None, demo_sample_mode=False):
+def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=None, vae=None, demo_sample_mode=False):
     """
     Run sampling.
     """
-    folder_name = f"{train_config['model']['model_type'].replace('/', '-')}-ckpt-{ckpt_path.split('/')[-1].split('.')[0]}-{train_config['sample']['num_sampling_steps']}".lower()
+    folder_name = f"{train_config['vae']['vae_type'].replace('/', '-')}-ckpt-{ckpt_path.split('/')[-1].split('.')[0]}-{train_config['flowvae_sample']['num_sampling_steps']}".lower()
 
     if cfg_scale is None:
-        cfg_scale = train_config['sample']['cfg_scale']
-    cfg_interval_start = train_config['sample']['cfg_interval_start'] if 'cfg_interval_start' in train_config['sample'] else 0
-    timestep_shift = train_config['sample']['timestep_shift'] if 'timestep_shift' in train_config['sample'] else 0
+        cfg_scale = train_config['flowvae_sample']['cfg_scale']
+    cfg_interval_start = train_config['flowvae_sample']['cfg_interval_start'] if 'cfg_interval_start' in train_config['flowvae_sample'] else 0
+    timestep_shift = train_config['flowvae_sample']['timestep_shift'] if 'timestep_shift' in train_config['flowvae_sample'] else 0
     if cfg_scale > 1.0:
         folder_name += f"-interval{cfg_interval_start:.2f}"+f"-cfg{cfg_scale:.2f}"
         folder_name += f"-shift{timestep_shift:.2f}"
+    folder_name += f"_decoded_images"
 
     if demo_sample_mode:
         cfg_interval_start = 0
@@ -62,20 +66,11 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
             os.makedirs(output_dir, exist_ok=True) 
             if not demo_sample_mode:
                 os.makedirs(sample_folder_dir, exist_ok=True) 
-    else:
-        png_files = [f for f in os.listdir(sample_folder_dir) if f.endswith('.png')]
-        png_count = len(png_files)
-        if png_count > train_config['sample']['fid_num'] and not demo_sample_mode:
-            if accelerator.process_index == 0:
-                print_with_prefix(f"Found {png_count} PNG files in {sample_folder_dir}, skip sampling.")
-            return sample_folder_dir
 
     torch.backends.cuda.matmul.allow_tf32 = True  # True: fast but may lead to some small numerical differences
     assert torch.cuda.is_available(), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
     torch.set_grad_enabled(False)
 
-    # Setup accelerator:
-    device = accelerator.device
 
     # Setup DDP:
     device = accelerator.device
@@ -85,30 +80,27 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     print_with_prefix(f"Starting rank={accelerator.local_process_index}, seed={seed}, world_size={accelerator.num_processes}.")
     rank = accelerator.local_process_index
 
-    # Load model:
-    if 'downsample_ratio' in train_config['vae']:
-        downsample_ratio = train_config['vae']['downsample_ratio']
-    else:
-        downsample_ratio = 16
-    latent_size = train_config['data']['image_size'] // downsample_ratio
-
-
+    # Load model:    
+    shift_lg = train_config['flowvae_transport']['shift_lg'] if 'shift_lg' in train_config['flowvae_transport'] else True
+    shifted_mu = train_config['flowvae_transport']['shifted_mu'] if 'shifted_mu' in train_config['flowvae_transport'] else 0.0
+    assert shift_lg or ((not shifted_mu) and (shifted_mu == 0.0))
     transport = create_transport(
-        train_config['transport']['path_type'],
-        train_config['transport']['prediction'],
-        train_config['transport']['loss_weight'],
-        train_config['transport']['train_eps'],
-        train_config['transport']['sample_eps'],
-        use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
-        use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
+        train_config['flowvae_transport']['path_type'],
+        train_config['flowvae_transport']['prediction'],
+        train_config['flowvae_transport']['loss_weight'],
+        train_config['flowvae_transport']['train_eps'],
+        train_config['flowvae_transport']['sample_eps'],
+        use_cosine_loss = train_config['flowvae_transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['flowvae_transport'] else False,
+        use_lognorm = train_config['flowvae_transport']['use_lognorm'] if 'use_lognorm' in train_config['flowvae_transport'] else False,
+        shift_lg = shift_lg, 
     )  # default: velocity;
     sampler = Sampler(transport)
     sample_fn = sampler.sample_ode(
-        sampling_method=train_config['sample']['sampling_method'],
-        num_steps=train_config['sample']['num_sampling_steps'],
-        atol=train_config['sample']['atol'],
-        rtol=train_config['sample']['rtol'],
-        reverse=train_config['sample']['reverse'],
+        sampling_method=train_config['flowvae_sample']['sampling_method'],
+        num_steps=train_config['flowvae_sample']['num_sampling_steps'] + 1,
+        atol=train_config['flowvae_sample']['atol'],
+        rtol=train_config['flowvae_sample']['rtol'],
+        reverse=train_config['flowvae_sample']['reverse'],
         timestep_shift=timestep_shift,
     )
     
@@ -122,25 +114,6 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         if accelerator.process_index == 0 and not demo_sample_mode:
             print_with_prefix(f"Saving .png samples at {sample_folder_dir}")
     accelerator.wait_for_everyone()
-
-    # Figure out how many samples we need to generate on each GPU and how many iterations we need to run:
-    n = train_config['sample']['per_proc_batch_size']
-    global_batch_size = n * accelerator.num_processes
-    # To make things evenly-divisible, we'll sample a bit more than we need and then discard the extra samples:
-    num_samples = len([name for name in os.listdir(sample_folder_dir) if (os.path.isfile(os.path.join(sample_folder_dir, name)) and ".png" in name)])
-    total_samples = int(math.ceil(train_config['sample']['fid_num'] / global_batch_size) * global_batch_size)
-    if not demo_sample_mode and rank == 0:
-        if accelerator.process_index == 0:
-            print_with_prefix(f"Total number of images that will be sampled: {total_samples}")
-    assert total_samples % accelerator.num_processes == 0, "total_samples must be divisible by world_size"
-    samples_needed_this_gpu = int(total_samples // accelerator.num_processes)
-    assert samples_needed_this_gpu % n == 0, "samples_needed_this_gpu must be divisible by the per-GPU batch size"
-    iterations = int(samples_needed_this_gpu // n)
-    done_iterations = int( int(num_samples // accelerator.num_processes) // n)
-    pbar = range(iterations)
-    if not demo_sample_mode:
-        pbar = tqdm(pbar) if rank == 0 else pbar
-    total = 0
     
     # ---------get latent info-----------------------
     latent_norm = train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False
@@ -169,7 +142,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     ])
 
     # Create dataset and dataloader
-    dataset = ImageFolder(root=train_config['data']['raw_data_dir'], transform=transform)
+    dataset = ImageFolder(root=train_config['data']['raw_val_data_dir'], transform=transform)
     distributed_sampler = DistributedSampler(dataset, num_replicas=accelerator.num_processes, rank=rank)
     val_dataloader = DataLoader(
         dataset,
@@ -184,13 +157,15 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         print_with_prefix(f"Latent std: {latent_std}")
         print_with_prefix(f"Latent multiplier: {latent_multiplier}")
 
-    init_std = train_config['transport']['init_std'] if 'init_std' in train_config['transport'] else 1.0
+    init_std = train_config['flowvae_transport']['init_std'] if 'init_std' in train_config['flowvae_transport'] else 1.0
+    
+    fid, avg_psnr, avg_lpips, avg_ssim = 0, 0, 0, 0
     if demo_sample_mode:
         if accelerator.process_index == 0:
             images = []
             for i in tqdm([2070, 3600, 3870, 9740, 880, 9790, 4170, 2790], desc="Generating Demo Samples"):
                 img = dataset.__getitem__(i)[0].unsqueeze(0).to(device)
-                y_ = model.encode(img).sample()
+                y_ = model.encode(img).sample() if vae is None else vae.encode_images(img)
                 y = (y_ - latent_mean) / latent_std * latent_multiplier
                 z = torch.randn(1, 3, image_size, image_size, device=device) * init_std
                 if using_cfg:
@@ -218,46 +193,116 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                 
             # Save the combined image
             Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_samples_cfg{cfg_scale}.png")
-
-            return None
+        accelerator.wait_for_everyone()
     else:
-        for i in pbar:
-            # Sample inputs:
-            z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
-            y = torch.randint(0, train_config['data']['num_classes'], (n,), device=device)
+        # Setup output directories
+        save_dir = sample_folder_dir
+        ref_path = os.path.join(train_config['train']['output_dir'], 'ref_images')
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(ref_path, exist_ok=True)
+
+        local_rank = accelerator.process_index
+        world_size = accelerator.num_processes
+        if local_rank == 0:
+            print_with_prefix(f"Output dir: {save_dir}")
+            print_with_prefix(f"Reference dir: {ref_path}")
+
+        # Save reference images if needed
+        ref_png_files = [f for f in os.listdir(ref_path) if f.endswith('.png')]
+        if len(ref_png_files) < 50000:
+            total_samples = 0
+            for batch in val_dataloader:
+                images = batch[0].to(device)
+                for j in range(images.size(0)):
+                    img = torch.clamp(127.5 * images[j] + 128.0, 0, 255).cpu().permute(1, 2, 0).numpy().astype(np.uint8)
+                    Image.fromarray(img).save(os.path.join(ref_path, f"ref_image_rank_{local_rank}_{total_samples}.png"))
+                    total_samples += 1
+                    if total_samples % 100 == 0 and local_rank == 0:
+                        print_with_prefix(f"Saved {total_samples * world_size} reference images")
+        accelerator.wait_for_everyone()
+
+        # Initialize metrics
+        lpips_values = []
+        ssim_values = []
+        lpips = LPIPS().to(device).eval()
+        ssim_metric = StructuralSimilarityIndexMeasure(data_range=(-1.0, 1.0)).to(device)
+
+        # Generate reconstructions and compute metrics
+        if local_rank == 0:
+            print_with_prefix("Generating reconstructions...")
+        all_indices = 0
+        for batch in val_dataloader:
+            images = batch[0].to(device)
             
-            # Setup classifier-free guidance:
-            if using_cfg:
-                z = torch.cat([z, z], 0)
-                y_null = torch.tensor([1000] * n, device=device)
-                y = torch.cat([y, y_null], 0)
-                model_kwargs = dict(y=y, cfg_scale=cfg_scale, cfg_interval=True, cfg_interval_start=cfg_interval_start)
-                model_fn = model.forward_with_cfg
-            else:
-                model_kwargs = dict(y=y)
-                model_fn = model.forward
+            with torch.no_grad():
+                # Sample inputs:
+                z = torch.randn(images.shape[0], 3, image_size, image_size, device=device) * init_std
+                y_ = model.encode(images).sample() if vae is None else vae.encode_images(images)
+                y = (y_ - latent_mean) / latent_std * latent_multiplier
+                
+                # Setup classifier-free guidance:
+                if using_cfg:
+                    z = torch.cat([z, z], 0)
+                    y_null = torch.zeros_like(y, device=device)
+                    y = torch.cat([y, y_null], 0)
+                    model_kwargs = dict(y=y, cfg_scale=cfg_scale, cfg_interval=True, cfg_interval_start=cfg_interval_start)
+                    model_fn = model.forward_with_cfg
+                else:
+                    model_kwargs = dict(y=y)
+                    model_fn = model.forward
+                samples = sample_fn(z, model_fn, **model_kwargs)[-1]
+                if using_cfg:
+                    samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+                decoded_images_tensor = samples
+                decoded_images = torch.clamp(127.5 * decoded_images_tensor + 128.0, 0, 255).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+            
+            # Compute metrics
+            lpips_values.append(lpips(decoded_images_tensor, images).mean())
+            ssim_values.append(ssim_metric(decoded_images_tensor, images))
+            
+            # Save reconstructions
+            for i, img in enumerate(decoded_images):
+                save_image(img, os.path.join(save_dir, f"decoded_image_rank_{local_rank}_{all_indices + i}.png"))
+                if (all_indices + i) % 100 == 0 and local_rank == 0 and i != 0:
+                    print_with_prefix(f"Processed {(all_indices + i) * world_size} images")
+            all_indices += len(decoded_images)
+        accelerator.wait_for_everyone()
 
-            samples = sample_fn(z, model_fn, **model_kwargs)[-1]
-            if using_cfg:
-                samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
+        # Aggregate metrics across GPUs
+        lpips_values = torch.tensor(lpips_values).to(device)
+        ssim_values = torch.tensor(ssim_values).to(device)
+        dist.all_reduce(lpips_values, op=dist.ReduceOp.AVG)
+        dist.all_reduce(ssim_values, op=dist.ReduceOp.AVG)
+        
+        avg_lpips = lpips_values.mean().item()
+        avg_ssim = ssim_values.mean().item()
 
-            samples = (samples * latent_std) / latent_multiplier + latent_mean
-            samples = vae.decode_to_images(samples)
+        fid, avg_psnr = 0, 0
+        if local_rank == 0:
+            # Calculate FID
+            print_with_prefix("Computing rFID...")
+            fid = calculate_fid_given_paths([ref_path, save_dir], batch_size=200, dims=2048, device=device, num_workers=32)
 
-            # Save samples to disk as individual .png files
-            for i, sample in enumerate(samples):
-                index = i * accelerator.num_processes + accelerator.process_index + total
-                Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
-            total += global_batch_size
-            accelerator.wait_for_everyone()
-        if accelerator.process_index == 0:
-            create_npz_from_sample_folder(sample_folder_dir, train_config['sample']['fid_num'])
+            # Calculate PSNR
+            print_with_prefix("Computing PSNR...")
+            psnr_values = calculate_psnr_between_folders(ref_path, save_dir)
+            avg_psnr = sum(psnr_values) / len(psnr_values)
 
-    return sample_folder_dir
+            # Print final results
+            print_with_prefix(f"Final Metrics:")
+            print_with_prefix(f"rFID: {fid:.3f}")
+            print_with_prefix(f"PSNR: {avg_psnr:.3f}")
+            print_with_prefix(f"LPIPS: {avg_lpips:.3f}")
+            print_with_prefix(f"SSIM: {avg_ssim:.3f}")
+            with open(sample_folder_dir.replace('_decoded_images', '.txt'), 'w') as f:
+                f.write(f"rFID: {fid:.3f}\nPSNR: {avg_psnr:.3f}\nLPIPS: {avg_lpips:.3f}\nSSIM: {avg_ssim:.3f}")
+        accelerator.wait_for_everyone()
+
+    return fid, avg_psnr, avg_lpips, avg_ssim
 
 # some utils
 def print_with_prefix(*messages):
-    prefix = f"\033[34m[DiT-Sampling {strftime('%Y-%m-%d %H:%M:%S')}]\033[0m"
+    prefix = f"\033[34m[FlowVAE-Sampling {strftime('%Y-%m-%d %H:%M:%S')}]\033[0m"
     combined_message = ' '.join(map(str, messages))
     print(f"{prefix}: {combined_message}")
 
@@ -266,6 +311,35 @@ def load_config(config_path):
         config = yaml.safe_load(file)
     return config
 
+
+def calculate_psnr(original, processed):
+    mse = torch.mean((original - processed) ** 2)
+    return 20 * torch.log10(255.0 / torch.sqrt(mse)).item()
+
+def load_image(image_path):
+    image = Image.open(image_path).convert('RGB')
+    return torch.tensor(np.array(image).transpose(2, 0, 1), dtype=torch.float32)
+
+def calculate_psnr_for_pair(original_path, processed_path):
+    return calculate_psnr(load_image(original_path), load_image(processed_path))
+
+def calculate_psnr_between_folders(original_folder, processed_folder):
+    original_files = sorted(os.listdir(original_folder))
+    processed_files = sorted(os.listdir(processed_folder))
+
+    if len(original_files) != len(processed_files):
+        print("Warning: Mismatched number of images in folders")
+        return []
+
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(calculate_psnr_for_pair,
+                          os.path.join(original_folder, orig),
+                          os.path.join(processed_folder, proc))
+            for orig, proc in zip(original_files, processed_files)
+        ]
+        return [future.result() for future in as_completed(futures)]
+    
 if __name__ == "__main__":
 
     # read config
@@ -274,7 +348,7 @@ if __name__ == "__main__":
     parser.add_argument('--demo', action='store_true', default=False)
     args = parser.parse_args()
     train_config = load_config(args.config)
-    # mixed_precision = train_config['sample']['precision'] if 'precision' in train_config['transport'] else 'no'
+    # mixed_precision = train_config['flowvae_sample']['precision'] if 'precision' in train_config['flowvae_transport'] else 'no'
     accelerator = Accelerator()
 
     # get ckpt_dir
@@ -282,11 +356,6 @@ if __name__ == "__main__":
     if accelerator.process_index == 0:
         print_with_prefix('Using ckpt:', train_config['ckpt_path'])
     ckpt_dir = train_config['ckpt_path']
-
-    if 'downsample_ratio' in train_config['vae']:
-        latent_size = train_config['data']['image_size'] // train_config['vae']['downsample_ratio']
-    else:
-        latent_size = train_config['data']['image_size'] // 8
 
     # get model
     kwargs = dict(
@@ -300,32 +369,14 @@ if __name__ == "__main__":
     model = VAE_Models[train_config['vae']['vae_type']](**kwargs)
 
     checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
-    # if "ema" in checkpoint:  # supports checkpoints from train.py
-    #     checkpoint = checkpoint["ema"]
-    if "model" in checkpoint:  # supports checkpoints from train.py
-        checkpoint = checkpoint["model"]
-        checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
+    if "ema" in checkpoint:  # supports checkpoints from train.py
+        checkpoint = checkpoint["ema"]
+    # if "model" in checkpoint:  # supports checkpoints from train.py
+    #     checkpoint = checkpoint["model"]
+    #     checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
     model.load_state_dict(checkpoint, strict=False)
     model.eval()  # important!
     model.to(accelerator.device)
 
-    # naive sample
-    sample_folder_dir = do_sample(train_config, accelerator, ckpt_path=ckpt_dir, model=model, demo_sample_mode=args.demo)
+    fid, avg_psnr, avg_lpips, avg_ssim = do_sample(train_config, accelerator, ckpt_path=ckpt_dir, model=model, demo_sample_mode=args.demo)
     
-    if not args.demo:
-        # calculate FID
-        # Important: FID is only for reference, please use ADM evaluation for paper reporting
-        if accelerator.process_index == 0:
-            from tools.calculate_fid import calculate_fid_given_paths
-            print_with_prefix('Calculating FID with {} number of samples'.format(train_config['sample']['fid_num']))
-            assert 'fid_reference_file' in train_config['data'], "fid_reference_file must be specified in config"
-            fid_reference_file = train_config['data']['fid_reference_file']
-            fid = calculate_fid_given_paths(
-                [fid_reference_file, sample_folder_dir],
-                batch_size=200,
-                dims=2048,
-                device='cuda',
-                num_workers=16,
-                sp_len = train_config['sample']['fid_num']
-            )
-            print_with_prefix('fid=',fid)
