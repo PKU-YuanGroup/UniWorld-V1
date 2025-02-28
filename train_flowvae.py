@@ -89,27 +89,19 @@ def do_train(train_config, accelerator):
         ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else False,
         upsampler=train_config['vae']['upsampler'] if 'upsampler' in train_config['vae'] else 'nearest',
         sample_mode=False, 
+        train_enc=train_config['vae']['train_enc'] if 'train_enc' in train_config['vae'] else False,
+        cross_attn=train_config['vae']['cross_attn'] if 'cross_attn' in train_config['vae'] else False,
     )
     model = VAE_Models[train_config['vae']['vae_type']](**kwargs)
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     # load pretrained model
     if 'weight_init' in train_config['train']:
-        if model.model_type == 'vavae':
-            sd = torch.load(train_config['train']['weight_init'], map_location="cpu")
-            if 'state_dict' in sd.keys():
-                sd = sd['state_dict']
-            sd = {k: v for k, v in sd.items() if 'foundation_model.model' not in k and 'loss' not in k}
-        elif model.model_type == 'sdvae':
-            from safetensors.torch import load_file
-            sd = load_file(train_config['train']['weight_init'])
-        elif model.model_type == 'marvae':
-            sd = torch.load(train_config['train']['weight_init'], map_location="cpu")["model"]
-        else:
-            raise ValueError(f"Invalid model type: {model.model_type}")
-
-        model = load_weights_with_shape_check(model, sd, rank=rank)
-        ema = load_weights_with_shape_check(ema, sd, rank=rank)
+        checkpoint = torch.load(train_config['train']['weight_init'], map_location=lambda storage, loc: storage)
+        # remove the prefix 'module.' from the keys
+        checkpoint['model'] = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}
+        model = load_weights_with_shape_check(model, checkpoint, rank=rank)
+        ema = load_weights_with_shape_check(ema, checkpoint, rank=rank)
         if accelerator.is_main_process:
             logger.info(f"Loaded pretrained model from {train_config['train']['weight_init']}")
 
@@ -178,15 +170,16 @@ def do_train(train_config, accelerator):
         raw_img_drop=train_config['data']['raw_img_drop'] if 'raw_img_drop' in train_config['data'] else 0.0,
     )    
     else:
-        from tools.extract_features import center_crop_arr
+        from tools.extract_features import center_crop_arr, random_crop_arr
         from torchvision import transforms
         from torchvision.datasets import ImageFolder
+
         transform = transforms.Compose([
-            transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+            transforms.Lambda(lambda pil_image: random_crop_arr(pil_image, crop_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
         ])
-        dataset = ImageFolder(train_config['data']['data_path'], transform=transform)
+        dataset = ImageFolder(train_config['data']['raw_data_dir'], transform=transform)
 
     batch_size_per_gpu = int(np.round(train_config['train']['global_batch_size'] / accelerator.num_processes))
     global_batch_size = batch_size_per_gpu * accelerator.num_processes
@@ -245,9 +238,16 @@ def do_train(train_config, accelerator):
         from models.lpips import LPIPS
         perceptual_loss = LPIPS().cuda().eval()
     while True:
-        for latent, label, raw_img in loader:
-            x = raw_img.to(device, non_blocking=True)
-            y = latent.to(device, non_blocking=True)  
+        for batch in loader:
+            if offline_features:
+                latent, label, raw_img = batch
+                x = raw_img.to(device, non_blocking=True)
+                y = latent.to(device, non_blocking=True)  
+            else:
+                raw_img, label = batch
+                x = raw_img.to(device, non_blocking=True)
+                y = model.module.module.encode(x.detach().clone()).sample()
+
             
             model_kwargs = dict(y=y)
             loss_dict = transport.training_losses(

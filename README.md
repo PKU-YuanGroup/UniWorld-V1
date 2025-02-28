@@ -53,7 +53,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/qiff_s_1000kx1024_qknorm_q1.yaml
+    --config configs/flow_b_1000kx1024_sdvae.yaml
 ```
 
 ### multi node

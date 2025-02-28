@@ -76,7 +76,7 @@ class GroupNorm(nn.Module):
         return self.norm(x)
     
 
-class RMSNorm(torch.nn.Module):
+class RMSNorm2D(torch.nn.Module):
     def __init__(self, num_channels: int, eps: float = 1e-6, *args, **kwargs):
         super().__init__()
         self.eps = eps
@@ -92,6 +92,20 @@ class RMSNorm(torch.nn.Module):
         x = rearrange(x, "b h w c -> b c h w")
         return x
     
+class RMSNorm1D(torch.nn.Module):
+    def __init__(self, num_channels: int, eps: float = 1e-6, *args, **kwargs):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(num_channels))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        x = output * self.weight
+        return x
+
 class LayerNorm(nn.Module):
     def __init__(self, num_channels, eps=1e-6, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -110,7 +124,7 @@ def Normalize(in_channels, num_groups=32, norm_type="groupnorm"):
     elif norm_type == "layernorm":
         return LayerNorm(num_channels=in_channels, eps=1e-6)
     elif norm_type == "rmsnorm":
-        return RMSNorm(num_channels=in_channels, eps=1e-6)
+        return RMSNorm2D(num_channels=in_channels, eps=1e-6)
 
 class Upsample(nn.Module):
     def __init__(self, in_channels, with_conv, upsampler='nearest'):
@@ -129,6 +143,70 @@ class Upsample(nn.Module):
             x = self.conv(x)
         return x
 
+class Attention(nn.Module):
+    """
+    Attention module of DiT.
+    """
+    def __init__(
+        self,
+        q_dim: int,
+        kv_dim: int,
+        out_dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0.,
+        proj_drop: float = 0.,
+        norm_layer: nn.Module = nn.LayerNorm,
+        fused_attn: bool = True,
+        use_rmsnorm: bool = False,
+    ) -> None:
+        super().__init__()
+        assert out_dim % num_heads == 0, 'dim should be divisible by num_heads'
+        
+        self.num_heads = num_heads
+        self.head_dim = out_dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.fused_attn = fused_attn
+        
+        if use_rmsnorm:
+            norm_layer = RMSNorm1D
+            
+        self.q = nn.Linear(q_dim, out_dim, bias=qkv_bias)
+        self.kv = nn.Linear(kv_dim, 2 * out_dim, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(out_dim, out_dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+        
+    def forward(self, q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = q.shape
+        q = rearrange(q, 'b c h w -> b (h w) c')
+        q = self.q(q).reshape(B, H*W, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        kv = rearrange(kv, 'b c h w -> b (h w) c')
+        kv = self.kv(kv).reshape(B, H*W, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        k, v = kv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)  # (batch_size, nheads, seqlen, headdim)
+        
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+            )
+        else:
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+        
+        x = x.transpose(1, 2).reshape(B, H*W, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        x = rearrange(x, 'B (H W) C -> B C H W', H=H, W=W)
+        return x
+    
 class ResnetBlock(nn.Module):
     def __init__(
         self,
@@ -139,6 +217,7 @@ class ResnetBlock(nn.Module):
         dropout,
         temb_channels=512,
         norm_type='groupnorm', 
+        cross_attn=False, 
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -151,7 +230,14 @@ class ResnetBlock(nn.Module):
             in_channels, out_channels, kernel_size=3, stride=1, padding=1
         )
         if temb_channels > 0:
-            self.temb_proj = torch.nn.Conv2d(temb_channels, out_channels, 1)
+            self.cross_attn = cross_attn
+            self.temb_proj = Attention(
+                q_dim=out_channels, kv_dim=temb_channels, out_dim=out_channels, 
+                num_heads=16,
+                qkv_bias=True,
+                qk_norm=True,
+                use_rmsnorm=True) if cross_attn else torch.nn.Conv2d(temb_channels, out_channels, 1)
+            
         self.norm2 = Normalize(out_channels, norm_type=norm_type)
         self.dropout = torch.nn.Dropout(dropout)
         self.conv2 = torch.nn.Conv2d(
@@ -174,7 +260,10 @@ class ResnetBlock(nn.Module):
         h = self.conv1(h)
 
         if temb is not None:
-            h = h + self.temb_proj(nonlinearity(temb))
+            if self.cross_attn:
+                h = self.temb_proj(h, temb)
+            else:
+                h = h + self.temb_proj(nonlinearity(temb))
 
         h = self.norm2(h)
         h = nonlinearity(h)
@@ -264,6 +353,7 @@ class FlowDecoder(nn.Module):
         temb_ch=512, 
         norm_type='groupnorm', 
         upsampler='nearest', 
+        cross_attn=False, 
         **ignore_kwargs,
     ):
         super().__init__()
@@ -299,7 +389,8 @@ class FlowDecoder(nn.Module):
             temb_channels=self.temb_ch,
             dropout=dropout,
             norm_type=norm_type, 
-            conv_shortcut=False
+            conv_shortcut=False, 
+            cross_attn=cross_attn, 
         )
         self.mid.attn_1 = AttnBlock(block_in, norm_type=norm_type)
         self.mid.block_2 = ResnetBlock(
@@ -308,7 +399,8 @@ class FlowDecoder(nn.Module):
             temb_channels=self.temb_ch,
             dropout=dropout,
             norm_type=norm_type, 
-            conv_shortcut=False
+            conv_shortcut=False, 
+            cross_attn=cross_attn, 
         )
 
         # upsampling
@@ -396,7 +488,9 @@ class FlowAE(nn.Module):
             norm_type='rmsnorm', 
             multi_latent=True, 
             add_y_to_x=False, 
-            upsampler='nearest'
+            upsampler='nearest', 
+            train_enc=False, 
+            cross_attn=False, 
             ):
         super().__init__()
         self.ch_mult = ch_mult
@@ -410,12 +504,14 @@ class FlowAE(nn.Module):
         if model_type == 'vavae' or model_type == 'sdvae':
             self.flow = FlowDecoder(
                 ch=ch, ch_mult=ch_mult, z_channels=ch * ch_mult[-1], 
-                attn_resolutions=(16,), temb_ch=hidden_size, norm_type=norm_type, upsampler=upsampler
+                attn_resolutions=(16,), temb_ch=hidden_size, norm_type=norm_type, upsampler=upsampler, 
+                cross_attn=cross_attn
                 )
         elif model_type == 'marvae':
             self.flow = FlowDecoder(
                 ch=ch, ch_mult=ch_mult, z_channels=ch * ch_mult[-1], 
-                attn_resolutions=(), temb_ch=hidden_size, norm_type=norm_type, upsampler=upsampler
+                attn_resolutions=(), temb_ch=hidden_size, norm_type=norm_type, upsampler=upsampler, 
+                cross_attn=cross_attn
                 )
 
         # flow
@@ -448,6 +544,15 @@ class FlowAE(nn.Module):
             self.quant_conv = torch.nn.Conv2d(2 * embed_dim, mult * embed_dim, 1)
             self.post_quant_conv = torch.nn.Conv2d(embed_dim, embed_dim, 1)
             self.init_from_ckpt(ckpt_path)
+
+        
+        if train_enc:
+            mult = 2 if self.use_variational else 1
+            self.encoder = Encoder(ch_mult=ch_mult, z_channels=embed_dim)
+            self.use_variational = use_variational
+            self.quant_conv = torch.nn.Conv2d(2 * embed_dim, mult * embed_dim, 1)
+            if ckpt_path is not None:
+                self.init_from_ckpt(ckpt_path)
 
     def init_from_ckpt(self, path):
         if self.model_type == 'vavae':
@@ -494,7 +599,7 @@ class FlowAE(nn.Module):
         dec = self.decoder(z)
         return dec
 
-    @torch.compile
+    # @torch.compile
     def forward(self, x, t=None, y=None, **kwargs):
         x = self.x_embedder(x) + self.pos_embed
         h = w = int(x.shape[1] ** 0.5)
@@ -632,7 +737,7 @@ if __name__ == '__main__':
     from models.lpips import LPIPS
     from transport import create_transport, Sampler
 
-    config_path = 'configs/flowsdvae_50kx512.yaml'
+    config_path = 'configs/flowsdvae_500kx512_lgn0p0_cross.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     input_size = train_config['data']['image_size']
@@ -650,117 +755,118 @@ if __name__ == '__main__':
         add_y_to_x=train_config['vae']['add_y_to_x'] if 'add_y_to_x' in train_config['vae'] else False,
         ckpt_path=train_config['vae']['model_path'] if 'model_path' in train_config['vae'] else False,
         upsampler=train_config['vae']['upsampler'] if 'upsampler' in train_config['vae'] else 'nearest',
+        cross_attn=train_config['vae']['cross_attn'] if 'cross_attn' in train_config['vae'] else False,
         sample_mode=True, 
     ).cuda()
 
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
-    # bsz = 2
-    # x = torch.randn(bsz, in_channels, input_size, input_size).cuda()
-    # t = torch.rand(bsz).cuda()
-    # y = torch.randn(bsz, model.embed_dim, latent_size, latent_size).cuda()
+    bsz = 2
+    x = torch.randn(bsz, in_channels, input_size, input_size).cuda()
+    t = torch.rand(bsz).cuda()
+    y = torch.randn(bsz, model.embed_dim, latent_size, latent_size).cuda()
 
-    # logit = model(x, t, y)
-    # print(logit.shape)
-
-
-    ckpt_dir = train_config['ckpt_path']
-    checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
-    # if "ema" in checkpoint:  # supports checkpoints from train.py
-    #     checkpoint = checkpoint["ema"]
-    if "model" in checkpoint:  # supports checkpoints from train.py
-        checkpoint = checkpoint["model"]
-        checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
-    model.load_state_dict(checkpoint, strict=False)
-    model.eval()  # important!
-    model.cuda()
-
-    transport = create_transport(
-        train_config['flowvae_transport']['path_type'],
-        train_config['flowvae_transport']['prediction'],
-        train_config['flowvae_transport']['loss_weight'],
-        train_config['flowvae_transport']['train_eps'],
-        train_config['flowvae_transport']['sample_eps'],
-        use_cosine_loss = train_config['flowvae_transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['flowvae_transport'] else False,
-        use_lognorm = train_config['flowvae_transport']['use_lognorm'] if 'use_lognorm' in train_config['flowvae_transport'] else False,
-    )  # default: velocity; 
-
-    sampler = Sampler(transport)
-    timestep_shift = train_config['flowvae_sample']['timestep_shift'] if 'timestep_shift' in train_config['flowvae_sample'] else 0
-    sample_fn = sampler.sample_ode(
-        sampling_method=train_config['flowvae_sample']['sampling_method'],
-        # num_steps=train_config['flowvae_sample']['num_sampling_steps'] + 1,
-        num_steps=1 + 1,
-        atol=train_config['flowvae_sample']['atol'],
-        rtol=train_config['flowvae_sample']['rtol'],
-        reverse=train_config['flowvae_sample']['reverse'],
-        timestep_shift=timestep_shift,
-    )
-
-    # Setup data
-    uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
-    raw_data_dir = train_config['data']['raw_data_dir'] if 'raw_data_dir' in train_config['data'] else None
-    crop_size = train_config['data']['image_size']
-    raw_img_transform = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
-    ])
-    dataset = ImgLatentDataset(
-        data_dir=train_config['data']['data_path'],
-        latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
-        latent_multiplier=train_config['data']['latent_multiplier'], 
-        raw_data_dir=raw_data_dir, 
-        raw_img_transform=raw_img_transform if raw_data_dir is not None else None, 
-        raw_img_drop=train_config['data']['raw_img_drop'] if 'raw_img_drop' in train_config['data'] else 0.0,
-    )    
-    batch_size_per_gpu = 4
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size_per_gpu,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=True,
-        drop_last=True
-    )
-
-    for latent, label, raw_img in loader:
-        x = raw_img.cuda()
-        y = latent.cuda()
-        model_kwargs = dict(y=y)
-        loss_dict = transport.training_losses(
-            model, x, model_kwargs, 
-            l2_loss=train_config['flowvae_transport']['l2_loss'] if 'l2_loss' in train_config['flowvae_transport'] else True
-            )
-        xt = loss_dict['xt']
-        x1 = loss_dict['x1']
-        x0 = loss_dict['x0']
-        pred = loss_dict['pred']
-        t = loss_dict['t'][:, None, None, None]
-        x1_pred = xt + (1-t) * pred
-        print(t)
-        save_image(xt, "xt.png", nrow=4, normalize=True, value_range=(-1, 1))
-        save_image(x1, "x1.png", nrow=4, normalize=True, value_range=(-1, 1))
-        save_image(x0, "x0.png", nrow=4, normalize=True, value_range=(-1, 1))
-        save_image(x1_pred, "x1_pred.png", nrow=4, normalize=True, value_range=(-1, 1))
-
-        z = x0
-        pred_ = model(z, loss_dict['t'], y)
-        x1_pred_ = xt + (1-t) * pred
-        save_image(x1_pred_, "x1_pred_.png", nrow=4, normalize=True, value_range=(-1, 1))
-
-        # perceptual_loss = LPIPS().cuda().eval()
-        # inputs = x1
-        # reconstructions = x1_pred
-        # p_loss = perceptual_loss(inputs, reconstructions).mean()
-        # print(p_loss)
+    logit = model(x, t, y)
+    print(logit.shape)
 
 
-        model_kwargs = dict(y=y)
-        model_fn = model.forward
-        samples = sample_fn(z, model_fn, **model_kwargs)[-1]
-        save_image(samples, "samples.png", nrow=4, normalize=True, value_range=(-1, 1))
+    # ckpt_dir = train_config['ckpt_path']
+    # checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
+    # # if "ema" in checkpoint:  # supports checkpoints from train.py
+    # #     checkpoint = checkpoint["ema"]
+    # if "model" in checkpoint:  # supports checkpoints from train.py
+    #     checkpoint = checkpoint["model"]
+    #     checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
+    # model.load_state_dict(checkpoint, strict=False)
+    # model.eval()  # important!
+    # model.cuda()
 
-        import ipdb;ipdb.set_trace()
-        print(1)
+    # transport = create_transport(
+    #     train_config['flowvae_transport']['path_type'],
+    #     train_config['flowvae_transport']['prediction'],
+    #     train_config['flowvae_transport']['loss_weight'],
+    #     train_config['flowvae_transport']['train_eps'],
+    #     train_config['flowvae_transport']['sample_eps'],
+    #     use_cosine_loss = train_config['flowvae_transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['flowvae_transport'] else False,
+    #     use_lognorm = train_config['flowvae_transport']['use_lognorm'] if 'use_lognorm' in train_config['flowvae_transport'] else False,
+    # )  # default: velocity; 
+
+    # sampler = Sampler(transport)
+    # timestep_shift = train_config['flowvae_sample']['timestep_shift'] if 'timestep_shift' in train_config['flowvae_sample'] else 0
+    # sample_fn = sampler.sample_ode(
+    #     sampling_method=train_config['flowvae_sample']['sampling_method'],
+    #     # num_steps=train_config['flowvae_sample']['num_sampling_steps'] + 1,
+    #     num_steps=1 + 1,
+    #     atol=train_config['flowvae_sample']['atol'],
+    #     rtol=train_config['flowvae_sample']['rtol'],
+    #     reverse=train_config['flowvae_sample']['reverse'],
+    #     timestep_shift=timestep_shift,
+    # )
+
+    # # Setup data
+    # uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
+    # raw_data_dir = train_config['data']['raw_data_dir'] if 'raw_data_dir' in train_config['data'] else None
+    # crop_size = train_config['data']['image_size']
+    # raw_img_transform = transforms.Compose([
+    #     transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    # ])
+    # dataset = ImgLatentDataset(
+    #     data_dir=train_config['data']['data_path'],
+    #     latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
+    #     latent_multiplier=train_config['data']['latent_multiplier'], 
+    #     raw_data_dir=raw_data_dir, 
+    #     raw_img_transform=raw_img_transform if raw_data_dir is not None else None, 
+    #     raw_img_drop=train_config['data']['raw_img_drop'] if 'raw_img_drop' in train_config['data'] else 0.0,
+    # )    
+    # batch_size_per_gpu = 4
+    # loader = DataLoader(
+    #     dataset,
+    #     batch_size=batch_size_per_gpu,
+    #     shuffle=True,
+    #     num_workers=0,
+    #     pin_memory=True,
+    #     drop_last=True
+    # )
+
+    # for latent, label, raw_img in loader:
+    #     x = raw_img.cuda()
+    #     y = latent.cuda()
+    #     model_kwargs = dict(y=y)
+    #     loss_dict = transport.training_losses(
+    #         model, x, model_kwargs, 
+    #         l2_loss=train_config['flowvae_transport']['l2_loss'] if 'l2_loss' in train_config['flowvae_transport'] else True
+    #         )
+    #     xt = loss_dict['xt']
+    #     x1 = loss_dict['x1']
+    #     x0 = loss_dict['x0']
+    #     pred = loss_dict['pred']
+    #     t = loss_dict['t'][:, None, None, None]
+    #     x1_pred = xt + (1-t) * pred
+    #     print(t)
+    #     save_image(xt, "xt.png", nrow=4, normalize=True, value_range=(-1, 1))
+    #     save_image(x1, "x1.png", nrow=4, normalize=True, value_range=(-1, 1))
+    #     save_image(x0, "x0.png", nrow=4, normalize=True, value_range=(-1, 1))
+    #     save_image(x1_pred, "x1_pred.png", nrow=4, normalize=True, value_range=(-1, 1))
+
+    #     z = x0
+    #     pred_ = model(z, loss_dict['t'], y)
+    #     x1_pred_ = xt + (1-t) * pred
+    #     save_image(x1_pred_, "x1_pred_.png", nrow=4, normalize=True, value_range=(-1, 1))
+
+    #     # perceptual_loss = LPIPS().cuda().eval()
+    #     # inputs = x1
+    #     # reconstructions = x1_pred
+    #     # p_loss = perceptual_loss(inputs, reconstructions).mean()
+    #     # print(p_loss)
+
+
+    #     model_kwargs = dict(y=y)
+    #     model_fn = model.forward
+    #     samples = sample_fn(z, model_fn, **model_kwargs)[-1]
+    #     save_image(samples, "samples.png", nrow=4, normalize=True, value_range=(-1, 1))
+
+    #     import ipdb;ipdb.set_trace()
+    #     print(1)
