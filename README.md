@@ -8,8 +8,8 @@ pip install -e .
 # extract feature
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
     --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/train \
     --data_split imagenet_train \
@@ -23,8 +23,8 @@ torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
 
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
     --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/train \
     --data_split imagenet_train \
@@ -44,8 +44,8 @@ torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
 ### single node
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1236 \
@@ -53,22 +53,22 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/flow_b_1000kx1024_sdvae.yaml
+    --config configs/flow_s_1000kx1024_sdvae.yaml
 ```
 
 ### multi node
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 0 \
     train.py \
     --config configs/flow_s_1000kx1024_sdvae.yaml
 
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 1 \
@@ -79,8 +79,8 @@ accelerate launch \
 ## tokenizer
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1236 \
@@ -88,36 +88,36 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train_flowvae.py \
-    --config configs/flowsdvae_50kx512_lgnm1p0.yaml
+    --config configs/flowsdvae_500kx512_lgn0p0_cross.yaml
 ```
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 0 \
     train_flowvae.py \
-    --config configs/flowsdvae_500kx512_lgn0p0.yaml
+    --config configs/flowsdvae_500kx512_lgn0p0_cross.yaml
 
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 1 \
     train_flowvae.py \
-    --config configs/flowsdvae_500kx512_lgn0p0.yaml
+    --config configs/flowsdvae_500kx512_lgn0p0_cross.yaml
 
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 2 \
     train_flowvae.py \
     --config configs/flowsdvae_500kx512_lgn0p0.yaml
 
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
     --machine_rank 3 \
@@ -130,8 +130,8 @@ accelerate launch \
 ## demo
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1234 \
@@ -139,14 +139,14 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/flow_s_1000kx1024_sdvae.yaml \
+    --config configs/flow_b_1000kx1024_sdvae.yaml \
     --demo 
 ```
 
 ### flowvae
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1234 \
@@ -154,7 +154,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     tools/evaluate_flowvae.py \
-    --config configs/flowsdvae_50kx512_l1.yaml \
+    --config configs/flowsdvae_500kx512_lgn0p0.yaml \
     --demo 
 ```
 
@@ -162,8 +162,8 @@ accelerate launch \
 
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1235 \
@@ -175,8 +175,8 @@ accelerate launch \
 ```
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1234 \
@@ -193,7 +193,7 @@ accelerate launch \
 
 ```
 conda create -n dit_eval python=3.10 -y
-conda activate dit_eval
+conda activate dit_lb_eval
 # cuda12.2
 pip install tensorflow==2.15.0 scipy requests tqdm numpy==1.23.5
 pip install nvidia-pyindex
@@ -203,8 +203,8 @@ pip install nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-runtime-cu12 n
 
 ## fid
 ```
-cd /data/FlowWorld
-conda activate dit_eval
+cd /storage/lb/FlowWorld
+conda activate dit_lb_eval
 python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
     /data/logs/tpt/diff_s_1000kx1024_fp32/dit-s-2-ckpt-1000000-250-diffusion.npz
@@ -214,8 +214,8 @@ python tools/evaluator.py \
 
 # eval tokenizer
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1234 \
@@ -231,8 +231,8 @@ accelerate launch \
 ```
 
 ```
-cd /data/FlowWorld
-conda activate dit
+cd /storage/lb/FlowWorld
+conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1234 \

@@ -155,16 +155,32 @@ def do_train(train_config, accelerator):
         for name, param in model.named_parameters():
             logger.info(f"{name+'.requires_grad':<60}: {param.requires_grad}")
 
-    opt = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()), 
-        lr=train_config['optimizer']['lr'], 
-        weight_decay=0, 
-        betas=(0.9, train_config['optimizer']['beta2'])
+    optimizer_name = train_config['optimizer']['optimizer_name'] if 'optimizer_name' in train_config['optimizer'] else 'adamw'
+    if optimizer_name == 'adamw':
+        opt = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()), 
+            lr=train_config['optimizer']['lr'], 
+            weight_decay=0, 
+            betas=(0.9, train_config['optimizer']['beta2'])
+            )
+    elif optimizer_name == 'muon':
+        from tools.muon import Muon
+        muon_params = [p for name, p in model.named_parameters() if p.ndim == 2 and p.requires_grad]
+        adamw_params = [p for name, p in model.named_parameters() if p.ndim != 2 and p.requires_grad]
+        opt = Muon(
+            lr=train_config['optimizer']['lr'],
+            wd=0.0,
+            muon_params=muon_params,
+            adamw_params=adamw_params,
         )
+    else:
+        assert 0, "optimizer not supported"
     
+
     # Setup data
     uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
     raw_data_dir = train_config['data']['raw_data_dir'] if 'raw_data_dir' in train_config['data'] else None
+    crop_size = train_config['data']['image_size']
     if offline_features:
         from tools.extract_features import center_crop_arr
         from torchvision import transforms
@@ -174,23 +190,23 @@ def do_train(train_config, accelerator):
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
         ])
         dataset = ImgLatentDataset(
-        data_dir=train_config['data']['data_path'],
-        latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
-        latent_multiplier=train_config['data']['latent_multiplier'], 
-        raw_data_dir=raw_data_dir, 
-        raw_img_transform=raw_img_transform if raw_data_dir is not None else None
-    )    
+            data_dir=train_config['data']['data_path'],
+            latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
+            latent_multiplier=train_config['data']['latent_multiplier'], 
+            raw_data_dir=raw_data_dir, 
+            raw_img_transform=raw_img_transform if raw_data_dir is not None else None
+        )    
     else:
-        from tools.extract_features import center_crop_arr
+        from tools.extract_features import center_crop_arr, random_crop_arr
         from torchvision import transforms
         from torchvision.datasets import ImageFolder
-        crop_size = train_config['data']['image_size']
+
         transform = transforms.Compose([
-            transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+            transforms.Lambda(lambda pil_image: random_crop_arr(pil_image, crop_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
         ])
-        dataset = ImageFolder(train_config['data']['data_path'], transform=transform)
+        dataset = ImageFolder(train_config['data']['raw_data_dir'], transform=transform)
 
     batch_size_per_gpu = int(np.round(train_config['train']['global_batch_size'] / accelerator.num_processes))
     global_batch_size = batch_size_per_gpu * accelerator.num_processes
@@ -325,12 +341,13 @@ def do_train(train_config, accelerator):
                     param.data.copy_(s_param.to(param.device).data)
                 # sampling without cfg
                 model.eval()
-                temp_cfg = train_config['sample']['cfg_scale']
-                train_config['sample']['cfg_scale'] = 1.0
+                temp_cfg, temp_steps = train_config['sample']['cfg_scale'], train_config['sample']['num_sampling_steps']
+                train_config['sample']['cfg_scale'], train_config['sample']['num_sampling_steps'] = 1.0, 250
                 with torch.no_grad():
                     sample_folder_dir = do_sample(
                         train_config, accelerator, ckpt_path=f"{train_steps:07d}.pt", model=model.module.module, vae=vae)
-                train_config['sample']['cfg_scale'] = temp_cfg
+                    torch.cuda.empty_cache()
+                train_config['sample']['cfg_scale'], train_config['sample']['num_sampling_steps'] = temp_cfg, temp_steps
                 model.train()
                 # restored
                 for c_param, param in zip(temp_stored_params, model.parameters()):

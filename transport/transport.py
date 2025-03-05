@@ -198,7 +198,6 @@ class Transport:
         if sp_timesteps is not None:
             # uniform sampling between self.sp_timesteps[0] and self.sp_timesteps[1]
             t = th.rand((x1.shape[0],)) * (sp_timesteps[1] - sp_timesteps[0]) + sp_timesteps[0]
-
         t = t.to(x1)
         return t, x0, x1
     

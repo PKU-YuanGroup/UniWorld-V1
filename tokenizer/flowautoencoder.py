@@ -599,7 +599,7 @@ class FlowAE(nn.Module):
         dec = self.decoder(z)
         return dec
 
-    # @torch.compile
+    @torch.compile
     def forward(self, x, t=None, y=None, **kwargs):
         x = self.x_embedder(x) + self.pos_embed
         h = w = int(x.shape[1] ** 0.5)

@@ -8,6 +8,7 @@
 
 import os
 import math
+from einops import rearrange
 import numpy as np
 
 import torch
@@ -516,8 +517,17 @@ DiT_models = {
 
 if __name__ == '__main__':
     import yaml
+    import sys
+    from torch.utils.data import DataLoader
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from tools.extract_features import center_crop_arr
+    from torchvision import transforms
+    from datasets.img_latent_dataset import ImgLatentDataset
+    from torchvision.utils import save_image
+    from tokenizer import VAE_Models
+    from transport import create_transport, Sampler
 
-    config_path = 'configs/debug.yaml'
+    config_path = 'configs/flow_s_1000kx1024_sdvae.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     # Create model:
@@ -537,15 +547,150 @@ if __name__ == '__main__':
         use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
         in_channels=in_channels, 
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
-    ).cuda()
+    )
 
+    ckpt_dir = train_config['ckpt_path']
+    checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
+    if "ema" in checkpoint:  # supports checkpoints from train.py
+        checkpoint = checkpoint["ema"]
+    # if "model" in checkpoint:  # supports checkpoints from train.py
+    #     checkpoint = checkpoint["model"]
+    #     checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
+    model.load_state_dict(checkpoint, strict=False)
+    model.eval()  # important!
+    model.cuda()
+
+    vae = VAE_Models[train_config['vae']['vae_type']](train_config['vae']['model_path'])
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
 
-    bsz = 2
+    bsz = 256
     x = torch.rand(bsz, in_channels, latent_size, latent_size).cuda()
     t = torch.rand(bsz).cuda()
     y = torch.randint(0, 1000, (bsz, )).cuda()
 
-    logit = model(x, t, y)
-    print(logit.shape)
+    # logit = model(x, t, y)
+    # print(logit.shape)
+    
+    transport = create_transport(
+        train_config['transport']['path_type'],
+        train_config['transport']['prediction'],
+        train_config['transport']['loss_weight'],
+        train_config['transport']['train_eps'],
+        train_config['transport']['sample_eps'],
+        use_cosine_loss = train_config['transport']['use_cosine_loss'] if 'use_cosine_loss' in train_config['transport'] else False,
+        use_lognorm = train_config['transport']['use_lognorm'] if 'use_lognorm' in train_config['transport'] else False,
+    )  # default: velocity; 
+
+    # model_kwargs = {'y': y}
+    # loss_dict = transport.training_losses(
+    #     model, x, model_kwargs, 
+    #     l2_loss=train_config['transport']['l2_loss'] if 'l2_loss' in train_config['transport'] else True, 
+    #     )
+    # import ipdb;ipdb.set_trace()
+    # print(1)
+    sampler = Sampler(transport)
+    sample_fn = sampler.sample_ode(
+        sampling_method=train_config['sample']['sampling_method'],
+        num_steps=train_config['sample']['num_sampling_steps'] + 1,
+        atol=train_config['sample']['atol'],
+        rtol=train_config['sample']['rtol'],
+        reverse=train_config['sample']['reverse'],
+        timestep_shift=0.0,
+    )
+
+
+    
+    # Setup data
+    uncondition = train_config['data']['uncondition'] if 'uncondition' in train_config['data'] else False
+    raw_data_dir = train_config['data']['raw_data_dir'] if 'raw_data_dir' in train_config['data'] else None
+    crop_size = train_config['data']['image_size']
+    raw_img_transform = transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, crop_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+    dataset = ImgLatentDataset(
+        data_dir=train_config['data']['data_path'],
+        latent_norm=train_config['data']['latent_norm'] if 'latent_norm' in train_config['data'] else False,
+        latent_multiplier=train_config['data']['latent_multiplier'], 
+        raw_data_dir=raw_data_dir, 
+        raw_img_transform=raw_img_transform if raw_data_dir is not None else None, 
+        raw_img_drop=train_config['data']['raw_img_drop'] if 'raw_img_drop' in train_config['data'] else 0.0,
+    )    
+    batch_size_per_gpu = 1
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size_per_gpu,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=True,
+        drop_last=True
+    )
+    latent_multiplier = train_config['data']['latent_multiplier'] if 'latent_multiplier' in train_config['data'] else 0.18215
+    fake_bs = 4
+    for latent, label, raw_img in loader:
+        x = latent.cuda().repeat(fake_bs, 1, 1, 1)
+        y = label.cuda().repeat(fake_bs)
+        t = torch.from_numpy(np.linspace(0.6, 0.9, fake_bs)).to(x.dtype)
+        t, x0, x1 = t.cuda(), torch.randn_like(x[:1, ...]).cuda(), x
+        t, xt, ut = transport.path_sampler.plan(t, x0, x1)
+        
+        pred = model(xt, t, y=y)
+        t = t[:, None, None, None]
+        x1_pred = xt + (1-t) * pred
+        
+        save_image(rearrange(xt, 'b c h w -> (b c) 1 h w'), "xt_latent.png", nrow=4, normalize=True, value_range=(xt.min().item(), xt.max().item()))
+        save_image(rearrange(x1, 'b c h w -> (b c) 1 h w'), "x1_latent.png", nrow=4, normalize=True, value_range=(x1.min().item(), xt.max().item()))
+        save_image(rearrange(x0, 'b c h w -> (b c) 1 h w'), "x0_latent.png", nrow=4, normalize=True, value_range=(x0.min().item(), xt.max().item()))
+        save_image(rearrange(x1_pred, 'b c h w -> (b c) 1 h w'), "x1_pred_latent.png", nrow=4, normalize=True, value_range=(x1_pred.min().item(), x1_pred.max().item()))
+
+        xt_samples = vae.model.decode(xt / latent_multiplier)
+        x1_samples = vae.model.decode(x1 / latent_multiplier)
+        x0_samples = vae.model.decode(x0 / latent_multiplier)
+        x1_pred_samples = vae.model.decode(x1_pred / latent_multiplier)
+        # import ipdb;ipdb.set_trace()
+        save_image(xt_samples, "xt_samples.png", nrow=4, normalize=True, value_range=(-1, 1))
+        save_image(x1_samples, "x1_samples.png", nrow=4, normalize=True, value_range=(-1, 1))
+        save_image(x0_samples, "x0_samples.png", nrow=4, normalize=True, value_range=(-1, 1))
+        save_image(x1_pred_samples, "x1_pred_samples.png", nrow=4, normalize=True, value_range=(-1, 1))
+        # import ipdb;ipdb.set_trace()
+
+        t_ = torch.stack([i - t[0] for i in t])
+        t_diff = torch.zeros([len(t_)] + list(t_.shape), dtype=t_.dtype, device=t_.device)
+        for i in range(len(t)):
+            t_diff[i, i:] = t_[:fake_bs-i]
+        print(t_diff)
+        x1_pred = xt.unsqueeze(1) + t_diff * pred.unsqueeze(1)
+        loss = torch.mean((x1_pred - xt.unsqueeze(0)) ** 2, dim=list(range(2, len(x1_pred.shape))))
+        print(loss)
+        loss_up = torch.triu(loss)
+        print(loss_up)
+
+
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        plt.figure(figsize=(10, 5))
+        i = 0
+        for row in loss_up:
+            plt.plot(row.float().detach().cpu().numpy(), label=f"{i}")
+            i += 1
+        plt.legend()
+
+        plt.xlabel("Index")
+        plt.ylabel("Value")
+        plt.title("Lines from Matrix Rows")
+        plt.savefig('loss.png')
+
+
+        for i in range(fake_bs):
+            x1_pred[i, :i+1] = 0
+        x1_pred_upper = rearrange(x1_pred, 'b n c h w -> (b n) c h w')
+        with torch.no_grad():
+            x1_pred_upper_samples = vae.model.decode(x1_pred_upper / latent_multiplier)
+        save_image(x1_pred_upper_samples, "x1_pred_upper_samples.png", nrow=x1_pred_upper_samples.shape[0]//fake_bs, normalize=True, value_range=(-1, 1))
+        import ipdb;ipdb.set_trace()
+        print('done')
+
+

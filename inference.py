@@ -20,6 +20,7 @@ from tokenizer import VAE_Models
 from datasets.img_latent_dataset import ImgLatentDataset
 from tools.save_npz import create_npz_from_sample_folder
 
+torch.backends.cuda.matmul.allow_tf32 = True  # True: fast but may lead to some small numerical differences
 
 # sample function
 def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=None, vae=None, demo_sample_mode=False):
@@ -50,7 +51,6 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         cfg_interval_start = 0
         timestep_shift = 0
         cfg_scale = 4.0
-        # cfg_scale = 1.0
         if use_transport:
             cfg_scale = 4.0
 
@@ -73,12 +73,11 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
     else:
         png_files = [f for f in os.listdir(sample_folder_dir) if f.endswith('.png')]
         png_count = len(png_files)
-        if png_count > train_config['sample']['fid_num'] and not demo_sample_mode:
+        if png_count >= train_config['sample']['fid_num'] and not demo_sample_mode:
             if accelerator.process_index == 0:
                 print_with_prefix(f"Found {png_count} PNG files in {sample_folder_dir}, skip sampling.")
             return sample_folder_dir
 
-    torch.backends.cuda.matmul.allow_tf32 = True  # True: fast but may lead to some small numerical differences
     assert torch.cuda.is_available(), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
     torch.set_grad_enabled(False)
 
@@ -120,7 +119,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
         sampler = Sampler(transport)
         sample_fn = sampler.sample_ode(
             sampling_method=train_config['sample']['sampling_method'],
-            num_steps=train_config['sample']['num_sampling_steps'],
+            num_steps=train_config['sample']['num_sampling_steps'] + 1,
             atol=train_config['sample']['atol'],
             rtol=train_config['sample']['rtol'],
             reverse=train_config['sample']['reverse'],
@@ -216,7 +215,7 @@ def do_sample(train_config, accelerator, ckpt_path=None, cfg_scale=None, model=N
                 grid[i*h:(i+1)*h, j*w:(j+1)*w] = image
                 
             # Save the combined image
-            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_samples.png")
+            Image.fromarray(grid).save(f"{train_config['train']['output_dir']}/demo_samples_cfg{cfg_scale}.png")
 
             return None
     else:
@@ -314,23 +313,31 @@ if __name__ == "__main__":
     model.eval()  # important!
     model.to(accelerator.device)
 
-    # naive sample
-    sample_folder_dir = do_sample(train_config, accelerator, ckpt_path=ckpt_dir, model=model, demo_sample_mode=args.demo)
-    
-    if not args.demo:
-        # calculate FID
-        # Important: FID is only for reference, please use ADM evaluation for paper reporting
-        if accelerator.process_index == 0:
-            from tools.calculate_fid import calculate_fid_given_paths
-            print_with_prefix('Calculating FID with {} number of samples'.format(train_config['sample']['fid_num']))
-            assert 'fid_reference_file' in train_config['data'], "fid_reference_file must be specified in config"
-            fid_reference_file = train_config['data']['fid_reference_file']
-            fid = calculate_fid_given_paths(
-                [fid_reference_file, sample_folder_dir],
-                batch_size=200,
-                dims=2048,
-                device='cuda',
-                num_workers=16,
-                sp_len = train_config['sample']['fid_num']
-            )
-            print_with_prefix('fid=',fid)
+    num_sampling_steps = train_config['sample']['num_sampling_steps']
+    num_sampling_steps = num_sampling_steps if isinstance(num_sampling_steps, list) else [num_sampling_steps]
+
+    for num_sampling_step in num_sampling_steps:
+        train_config['sample']['num_sampling_steps'] = num_sampling_step
+
+        # naive sample
+        sample_folder_dir = do_sample(train_config, accelerator, ckpt_path=ckpt_dir, model=model, demo_sample_mode=args.demo)
+        result_file = f'{sample_folder_dir}.txt'
+        if (not args.demo) and (not os.path.exists(result_file)):
+            # calculate FID
+            # Important: FID is only for reference, please use ADM evaluation for paper reporting
+            if accelerator.process_index == 0:
+                from tools.calculate_fid import calculate_fid_given_paths
+                print_with_prefix('Calculating FID with {} number of samples'.format(train_config['sample']['fid_num']))
+                assert 'fid_reference_file' in train_config['data'], "fid_reference_file must be specified in config"
+                fid_reference_file = train_config['data']['fid_reference_file']
+                fid = calculate_fid_given_paths(
+                    [fid_reference_file, sample_folder_dir],
+                    batch_size=200,
+                    dims=2048,
+                    device='cuda',
+                    num_workers=16,
+                    sp_len = train_config['sample']['fid_num']
+                )
+                print_with_prefix('fid=',fid)
+                with open(f'{sample_folder_dir}.txt', 'w') as f:
+                    f.write(f"FID: {fid:.8f}")
