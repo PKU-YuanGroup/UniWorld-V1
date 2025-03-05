@@ -238,6 +238,7 @@ class Transport:
         terms['xt'] = xt
         terms['x1'] = x1
         terms['x0'] = x0
+        terms['ut'] = ut
         terms['t'] = t
         if self.model_type == ModelType.VELOCITY:
             terms['loss'] = mean_flat(((model_output - ut) ** 2)) if l2_loss else mean_flat((model_output - ut).abs())

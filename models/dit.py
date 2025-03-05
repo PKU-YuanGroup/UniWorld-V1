@@ -319,7 +319,10 @@ class DiT(nn.Module):
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
         self.initialize_weights()
-
+    def get_trainable_modules(self):
+        return [self.x_embedder, self.t_embedder, self.y_embedder, self.blocks, self.final_layer]
+    def get_last_layer(self):
+        return self.final_layer.linear.weight
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):

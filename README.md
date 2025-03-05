@@ -56,6 +56,19 @@ accelerate launch \
     --config configs/flow_s_1000kx1024_sdvae.yaml
 ```
 
+```
+cd /storage/lb/FlowWorld
+conda activate dit_lb
+accelerate launch \
+    --main_process_ip 127.0.0.1 \
+    --main_process_port 1236 \
+    --machine_rank 0 \
+    --num_processes 8 \
+    --num_machines 1 \
+    train_disc.py \
+    --config configs/flow_s_1000kx1024_sdvae_disc_noada.yaml
+```
+
 ### multi node
 
 ```
