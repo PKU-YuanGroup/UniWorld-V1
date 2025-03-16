@@ -45,6 +45,7 @@ train:
   seed: 1234
   precision: 'bf16'
   weight_init: '../logs/flow/flow_s_1000kx1024_sdvae/checkpoints/1000000.pt'
+  resume: true
 optimizer:
   lr: 0.0002
   beta2: 0.95

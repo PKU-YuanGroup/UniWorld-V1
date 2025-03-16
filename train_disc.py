@@ -111,10 +111,18 @@ def do_train(train_config, accelerator):
         in_channels=train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4,
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
+        class_dropout_prob=0.0, # do it after dataloader but before model.forward
     )
-    if 'decoder' in train_config['model']:
-        kwargs.update(dict(decoder=train_config['model']['decoder']))
     model = Models[train_config['model']['model_type']](**kwargs)
+
+    disc_config = train_config['discriminator']
+    disc = LatentDiscriminator(
+        disc_start=disc_config['disc_start'],
+        disc_model=disc_config['disc_model'],
+        disc_weight=disc_config['disc_weight'],
+        disc_factor=disc_config['disc_factor'] if 'disc_factor' in disc_config else 1.0,
+        complex_model=deepcopy(model) if disc_config['disc_model']['complex'] else None
+    )
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     # load pretrained model
@@ -137,15 +145,6 @@ def do_train(train_config, accelerator):
                     param.requires_grad = True
                     break
     
-    disc_config = train_config['discriminator']
-    disc = LatentDiscriminator(
-        disc_start=disc_config['disc_start'],
-        disc_in_channels=model.in_channels, 
-        patch_size=disc_config['patch_size'],
-        disc_weight=disc_config['disc_weight'],
-        disc_factor=disc_config['disc_factor'] if 'disc_factor' in disc_config else 1.0,
-    )
-
     model = DDP(model.to(device), device_ids=[device])
     disc = DDP(disc.to(device), device_ids=[device])
 
@@ -168,6 +167,7 @@ def do_train(train_config, accelerator):
 
     if accelerator.is_main_process:
         logger.info(f"Model: {model}")
+        logger.info(f"Discriminator: {disc}")
         logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
         logger.info(f"DiT Trainable Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M")
         logger.info(f"Discriminator Parameters: {sum(p.numel() for p in disc.parameters()) / 1e6:.2f}M")
@@ -289,6 +289,7 @@ def do_train(train_config, accelerator):
     log_steps = 0
     running_loss = 0
     running_grad_norm = 0
+    running_disc_grad_norm = 0
     running_g_loss = 0
     running_d_weight = 0
     running_gen_step_disc_factor = 0
@@ -310,6 +311,9 @@ def do_train(train_config, accelerator):
             if uncondition:
                 y = (torch.ones_like(y) * train_config['data']['num_classes']).to(y.dtype)
             y = y.to(device, non_blocking=True)  
+
+            drop_ids = torch.rand(y.shape[0], device=y.device) < 0.1 # 0.1 cfg
+            y = torch.where(drop_ids, train_config['data']['num_classes'], y).contiguous()
             model_kwargs = dict(y=y)
 
             # select generator or discriminator
@@ -327,15 +331,13 @@ def do_train(train_config, accelerator):
             if use_diffusion:
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                main_loss = loss_dict["loss"].mean()
+                cos_loss = torch.tensor(0.0, device=device)
+                mse_loss = loss_dict["loss"].mean()
             else:
                 loss_dict = transport.training_losses(model, x, model_kwargs)
-                if 'cos_loss' in loss_dict:
-                    mse_loss = loss_dict["loss"].mean()
-                    main_loss = loss_dict["cos_loss"].mean() + mse_loss
-                else:
-                    mse_loss = loss_dict["loss"].mean()
-                    main_loss = 1.0 * mse_loss
+                cos_loss = loss_dict["cos_loss"].mean() if 'cos_loss' in loss_dict else torch.tensor(0.0, device=device)
+                mse_loss = loss_dict["loss"].mean()
+            main_loss = cos_loss + mse_loss
 
             running_loss += mse_loss.item()
             ut = loss_dict['ut']
@@ -357,9 +359,13 @@ def do_train(train_config, accelerator):
 
                 inputs = xt + stride_gt * ut
                 recon = xt.detach() + stride_pred * pred
+
                 g_loss, g_log = disc(
-                    inputs.detach(),
-                    recon,
+                    inputs.detach()[~drop_ids],
+                    recon[~drop_ids],
+                    (t + stride_gt)[~drop_ids], 
+                    (t + stride_pred)[~drop_ids], 
+                    y[~drop_ids], 
                     main_loss,
                     optimizer_idx=0, # 0 - generator
                     global_step=train_steps,
@@ -382,14 +388,18 @@ def do_train(train_config, accelerator):
                 update_ema(ema, model.module)
 
             if step_dis:                
-                stride_gt = torch.where((1-t-delta_t_for_gt) < 0, t, delta_t_for_gt)
-                stride_pred = torch.where((1-t-delta_t_for_pred) < 0, t, delta_t_for_pred)
+                stride_gt = torch.where((1-t-delta_t_for_gt) < 0, 1-t, delta_t_for_gt)
+                stride_pred = torch.where((1-t-delta_t_for_pred) < 0, 1-t, delta_t_for_pred)
 
                 inputs = xt + stride_gt * ut
                 recon = xt + stride_pred * pred
+                
                 g_loss, g_log = disc(
-                    inputs.detach(),
-                    recon.detach(),
+                    inputs.detach()[~drop_ids],
+                    recon.detach()[~drop_ids],
+                    (t + stride_gt)[~drop_ids], 
+                    (t + stride_pred)[~drop_ids], 
+                    y[~drop_ids], 
                     main_loss,
                     optimizer_idx=1, # 1 - discriminator
                     global_step=train_steps,
@@ -399,6 +409,7 @@ def do_train(train_config, accelerator):
                 accelerator.backward(g_loss)
 
                 # because step_dis in each two step, we need * 2 to log, then averaged by total step
+                running_disc_grad_norm += get_grad_norm(disc) * 2 if train_steps >= disc.module.discriminator_iter_start else 1
                 running_disc_loss += g_log['disc_loss'] * 2
                 running_logits_real += g_log['logits_real'] * 2
                 running_logits_fake += g_log['logits_fake'] * 2
@@ -417,6 +428,7 @@ def do_train(train_config, accelerator):
                 # Reduce loss history over all processes:
                 avg_loss = reduce_over_all_processes(running_loss, log_steps, device=device)
                 avg_grad_norm = reduce_over_all_processes(running_grad_norm, log_steps, device=device)
+                avg_disc_grad_norm = reduce_over_all_processes(running_disc_grad_norm, log_steps, device=device)
                 avg_g_loss = reduce_over_all_processes(running_g_loss, log_steps, device=device)
                 avg_d_weight = reduce_over_all_processes(running_d_weight, log_steps, device=device)
                 avg_gen_step_disc_factor = reduce_over_all_processes(running_gen_step_disc_factor, log_steps, device=device)
@@ -428,24 +440,26 @@ def do_train(train_config, accelerator):
                 if accelerator.is_main_process:
                     logger.info(
                         f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, "
-                        f"Grad Norm: {avg_grad_norm:.4f}, "
+                        f"Grad Norm: {avg_grad_norm:.4f}, Disc Grad Norm: {avg_disc_grad_norm:.4f}, "
                         f"Gen Step Disc Loss: {avg_g_loss:.4f}, Disc Weight: {avg_d_weight:.4f}, Gen Step Disc Factor: {avg_gen_step_disc_factor:.4f}, "
-                        f"Disc Step Disc Loss: {avg_disc_loss:.4f}, Logits Real: {avg_logits_real:.4f}, Logits Fake: {avg_logits_fake:.4f}, Disc Step Disc Factor: {avg_disc_step_disc_factor:.4f}, "
+                        f"Disc Step Disc Loss: {avg_disc_loss:.4f}, Logits Real: {avg_logits_real:.4f}, Logits Fake: {avg_logits_fake:.4f}, Disc Step Disc Factor: {avg_disc_step_disc_factor:.4f}"
                         )
                     accelerator.log({
-                        "loss": avg_loss, "grad_norm": avg_grad_norm, 
+                        "loss": avg_loss, "grad_norm": avg_grad_norm, "disc_grad_norm": avg_disc_grad_norm, 
                         "gan/avg_g_loss": avg_g_loss, "gan/avg_d_weight": avg_d_weight, "gan/avg_gen_step_disc_factor": avg_gen_step_disc_factor, 
                         "gan/avg_disc_loss": avg_disc_loss, "gan/avg_logits_real": avg_logits_real, "gan/avg_logits_fake": avg_logits_fake, "gan/avg_disc_step_disc_factor": avg_disc_step_disc_factor, 
                         }, step=train_steps)
                 # Reset monitoring variables:
                 running_loss = 0
                 running_grad_norm = 0
+                running_disc_grad_norm = 0
                 running_g_loss = 0
                 running_d_weight = 0
-                running_disc_factor = 0
+                running_gen_step_disc_factor = 0
                 running_disc_loss = 0
                 running_logits_real = 0
                 running_logits_fake = 0
+                running_disc_step_disc_factor = 0
                 log_steps = 0
                 start_time = time()
 

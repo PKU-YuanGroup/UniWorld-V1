@@ -61,6 +61,12 @@ def get_grad_norm(model, norm_type=2):
             total_norm += param_norm.item() ** norm_type
     return total_norm ** (1.0 / norm_type)
 
+def reduce_over_all_processes(running_data, log_steps, device):
+    avg_data = torch.tensor(running_data / log_steps, device=device)
+    dist.all_reduce(avg_data, op=dist.ReduceOp.SUM)
+    avg_data = avg_data.item() / dist.get_world_size()
+    return avg_data
+
 def do_train(train_config, accelerator):
     """
     Trains a DiT.
@@ -136,7 +142,12 @@ def do_train(train_config, accelerator):
             learn_sigma=train_config['diffusion']['learn_sigma'], 
             diffusion_steps=train_config['diffusion']['diffusion_steps'], 
             )  # default: 1000 steps, linear noise schedule
-    else:
+    else:    
+        timestep_sampling = train_config['transport']['timestep_sampling'] if 'timestep_sampling' in train_config['transport'] else 'lognorm'
+        shift_lg = train_config['transport']['shift_lg'] if 'shift_lg' in train_config['transport'] else True
+        shifted_mu = train_config['transport']['shifted_mu'] if 'shifted_mu' in train_config['transport'] else 0.0
+        assert (timestep_sampling == 'lognorm') or ((timestep_sampling != 'lognorm') and (not shift_lg))
+        assert shift_lg or ((not shifted_mu) and (shifted_mu == 0.0))
         transport = create_transport(
             train_config['transport']['path_type'],
             train_config['transport']['prediction'],
@@ -233,7 +244,7 @@ def do_train(train_config, accelerator):
         # check if the checkpoint exists
         checkpoint_files = glob(f"{checkpoint_dir}/*.pt")
         if checkpoint_files:
-            checkpoint_files.sort(key=lambda x: os.path.getsize(x))
+            checkpoint_files.sort(key=lambda x: int(x.split('/')[-1].split('.')[0]))
             latest_checkpoint = checkpoint_files[-1]
             checkpoint = torch.load(latest_checkpoint, map_location=lambda storage, loc: storage)
             model.load_state_dict(checkpoint['model'])
@@ -252,6 +263,7 @@ def do_train(train_config, accelerator):
         train_steps = 0
     log_steps = 0
     running_loss = 0
+    running_cos_loss = 0
     running_grad_norm = 0
     eval_every = train_config['train']['eval_every'] if 'eval_every' in train_config['train'] else math.inf
     start_time = time()
@@ -268,15 +280,17 @@ def do_train(train_config, accelerator):
             if use_diffusion:
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                loss = loss_dict["loss"].mean()
+                mse_loss = loss_dict["loss"].mean()
+                cos_loss = torch.tensor(0.0)
             else:
-                loss_dict = transport.training_losses(model, x, model_kwargs)
-                
-                if 'cos_loss' in loss_dict:
-                    mse_loss = loss_dict["loss"].mean()
-                    loss = loss_dict["cos_loss"].mean() + mse_loss
-                else:
-                    loss = loss_dict["loss"].mean()
+                loss_dict = transport.training_losses(
+                    model, x, model_kwargs, 
+                    shifted_mu=shifted_mu, timestep_sampling=timestep_sampling
+                    )
+                mse_loss = loss_dict["loss"].mean()
+                cos_loss = loss_dict["cos_loss"].mean() if 'cos_loss' in loss_dict else torch.tensor(0.0)
+            loss = cos_loss + mse_loss
+
             opt.zero_grad()
             accelerator.backward(loss)
             if 'max_grad_norm' in train_config['optimizer']:
@@ -287,10 +301,8 @@ def do_train(train_config, accelerator):
             update_ema(ema, model.module)
 
             # Log loss values:
-            if 'cos_loss' in loss_dict:
-                running_loss += mse_loss.item()
-            else:
-                running_loss += loss.item()
+            running_loss += mse_loss.item()
+            running_cos_loss += cos_loss.item()
             log_steps += 1
             train_steps += 1
             if train_steps % train_config['train']['log_every'] == 0:
@@ -299,19 +311,22 @@ def do_train(train_config, accelerator):
                 end_time = time()
                 steps_per_sec = log_steps / (end_time - start_time)
                 # Reduce loss history over all processes:
-                avg_loss = torch.tensor(running_loss / log_steps, device=device)
-                dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-                avg_loss = avg_loss.item() / dist.get_world_size()
-                # Reduce loss history over all processes:
-                avg_grad_norm = torch.tensor(running_grad_norm / log_steps, device=device)
-                dist.all_reduce(avg_grad_norm, op=dist.ReduceOp.SUM)
-                avg_grad_norm = avg_grad_norm.item() / dist.get_world_size()
+                avg_loss = reduce_over_all_processes(running_loss, log_steps, device=device)
+                avg_grad_norm = reduce_over_all_processes(running_grad_norm, log_steps, device=device)
+                avg_cos_loss = reduce_over_all_processes(running_cos_loss, log_steps, device=device)
                 if accelerator.is_main_process:
-                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.4f}")
-                    accelerator.log({"loss": avg_loss, "grad_norm": avg_grad_norm}, step=train_steps)
+                    info = f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f}, Train Steps/Sec: {steps_per_sec:.2f}, Grad Norm: {avg_grad_norm:.4f}"
+                    if avg_cos_loss != 0: info += f", Cos Loss: {avg_cos_loss:.4f}"
+                    logger.info(info)
+
+                    log_dict = dict(loss=avg_loss, grad_norm=avg_grad_norm)
+                    if avg_cos_loss != 0: log_dict['cos_loss'] = avg_cos_loss
+                    accelerator.log(log_dict, step=train_steps)
+
                 # Reset monitoring variables:
                 running_loss = 0
                 running_grad_norm = 0
+                running_cos_loss = 0
                 log_steps = 0
                 start_time = time()
 

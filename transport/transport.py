@@ -226,8 +226,9 @@ class Transport:
         
         t, x0, x1 = self.sample(
             x1, sp_timesteps, shifted_mu, timestep_sampling, 
-            beta_alpha=beta_alpha, beta_beta=beta_beta, pareto_alpha=pareto_alpha
+            beta_alpha=beta_alpha, beta_beta=beta_beta, pareto_alpha=pareto_alpha, 
             )
+        
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
         model_output = model(xt, t, **model_kwargs)
         B, *_, C = xt.shape

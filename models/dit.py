@@ -141,7 +141,8 @@ class LabelEmbedder(nn.Module):
     """
     def __init__(self, num_classes, hidden_size, dropout_prob):
         super().__init__()
-        use_cfg_embedding = dropout_prob > 0
+        # use_cfg_embedding = dropout_prob > 0
+        use_cfg_embedding = 1
         self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
@@ -374,7 +375,7 @@ class DiT(nn.Module):
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
 
-    def forward(self, x, t=None, y=None, **kwargs):
+    def forward_feature(self, x, t=None, y=None, **kwargs):
         """
         Forward pass of DiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -392,6 +393,17 @@ class DiT(nn.Module):
                 x = checkpoint(block, x, c, self.feat_rope, use_reentrant=True)
             else:
                 x = block(x, c, self.feat_rope)
+        return x, t, c
+
+    def forward(self, x, t=None, y=None, **kwargs):
+        """
+        Forward pass of DiT.
+        x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
+        t: (N,) tensor of diffusion timesteps
+        y: (N,) tensor of class labels
+        use_checkpoint: boolean to toggle checkpointing
+        """
+        x, _, c = self.forward_feature(x, t, y, **kwargs)
 
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
