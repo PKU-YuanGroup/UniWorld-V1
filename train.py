@@ -134,7 +134,7 @@ def do_train(train_config, accelerator):
                     param.requires_grad = True
                     break
     
-    model = DDP(model.to(device), device_ids=[device])
+    model = DDP(model.to(device), device_ids=[device], find_unused_parameters=True)
 
     if use_diffusion:
         diffusion = create_diffusion(

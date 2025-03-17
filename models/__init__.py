@@ -6,6 +6,7 @@
 # LightningDiT: https://github.com/hustvl/LightningDiT
 # --------------------------------------------------------
 from .dit import DiT_models
-from .discriminator import LatentDiscriminator
+from .mmdit import MMDiT_models
 Models = {}
 Models.update(DiT_models)
+Models.update(MMDiT_models)

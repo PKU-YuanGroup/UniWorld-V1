@@ -46,14 +46,14 @@ torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
 ```
 cd /storage/lb/FlowWorld
 conda activate dit_lb
-accelerate launch \
+TORCH_DISTRIBUTED_DEBUG="DETAIL" accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1236 \
     --machine_rank 0 \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/flow_s_1000kx1024_sdvae.yaml
+    --config configs/flow_s_1000kx1024_sdvae_t1y1.yaml
 ```
 
 ```
@@ -77,7 +77,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch \
     --num_processes 4 \
     --num_machines 1 \
     train_disc.py \
-    --config configs/flow_s_1000kx1024_sdvae_disc_ada_drop0p5.yaml
+    --config configs/flow_s_1000kx1024_sdvae_disc_ada_drop0p3_dt0p01_complex.yaml
 ```
 
 ### multi node
