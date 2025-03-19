@@ -93,9 +93,10 @@ class TimestepEmbedder(nn.Module):
     Embeds scalar timesteps into vector representations.
     Same as DiT.
     """
-    def __init__(self, hidden_size: int, frequency_embedding_size: int = 256) -> None:
+    def __init__(self, hidden_size: int, num_timestep_token: int = 1, frequency_embedding_size: int = 256) -> None:
         super().__init__()
-        self.frequency_embedding_size = frequency_embedding_size
+        self.num_timestep_token = num_timestep_token
+        self.frequency_embedding_size = num_timestep_token * frequency_embedding_size
         self.mlp = nn.Sequential(
             nn.Linear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
@@ -111,7 +112,7 @@ class TimestepEmbedder(nn.Module):
             dim: The dimension of the output.
             max_period: Controls the minimum frequency of the embeddings.
         Returns:
-            An (N, D) Tensor of positional embeddings.
+            An (N, n, D) Tensor of positional embeddings.
         """
         # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
         half = dim // 2
@@ -130,6 +131,7 @@ class TimestepEmbedder(nn.Module):
     @torch.compile
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_freq = t_freq.reshape(t_freq.shape[0], self.num_timestep_token, -1)
         t_emb = self.mlp(t_freq)
         return t_emb
 
@@ -139,13 +141,14 @@ class LabelEmbedder(nn.Module):
     Embeds class labels into vector representations. Also handles label dropout for classifier-free guidance.
     Same as DiT.
     """
-    def __init__(self, num_classes, hidden_size, dropout_prob):
+    def __init__(self, num_classes, hidden_size, dropout_prob, num_label_token):
         super().__init__()
         # use_cfg_embedding = dropout_prob > 0
         use_cfg_embedding = 1
-        self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
+        self.embedding_table = nn.ModuleList([nn.Embedding(num_classes + use_cfg_embedding, hidden_size) for _ in range(num_label_token)])
         self.num_classes = num_classes
         self.dropout_prob = dropout_prob
+        self.num_label_token = num_label_token
 
     def token_drop(self, labels, force_drop_ids=None):
         """
@@ -163,7 +166,8 @@ class LabelEmbedder(nn.Module):
         use_dropout = self.dropout_prob > 0
         if (train and use_dropout) or (force_drop_ids is not None):
             labels = self.token_drop(labels, force_drop_ids)
-        embeddings = self.embedding_table(labels)
+
+        embeddings = torch.stack([m(labels) for m in self.embedding_table], dim=1)
         return embeddings
     
 class DiTBlock(nn.Module):
@@ -184,14 +188,9 @@ class DiTBlock(nn.Module):
         use_qknorm=False,
         use_swiglu=False, 
         use_rmsnorm=False,
-        num_timestep_token=1, 
-        num_label_token=1, 
         **block_kwargs
     ):
         super().__init__()
-        self.num_timestep_token = num_timestep_token
-        self.num_label_token = num_label_token
-        self.rope_begin = num_timestep_token + num_label_token
 
         # Initialize normalization layers
         if not use_rmsnorm:
@@ -225,33 +224,12 @@ class DiTBlock(nn.Module):
                 drop=0
             )
         
-        # Initialize AdaLN modulation
-        # calc_mid_hidden_size = lambda hidden_size, n: math.floor((3 * hidden_size) / (n + 1) / 64) * 64
-        calc_mid_hidden_size = lambda hidden_size, n: math.floor((3 * hidden_size) / (n + 1) / 64) * 64
-        timestep_mid_hidden_size = calc_mid_hidden_size(hidden_size, num_timestep_token)
-        self.timestep_mlp = nn.Sequential(
-            nn.Linear(hidden_size, timestep_mid_hidden_size, bias=True), 
-            nn.SiLU(),
-            nn.Linear(timestep_mid_hidden_size, num_timestep_token * hidden_size, bias=True)
-        )
-        label_mid_hidden_size = calc_mid_hidden_size(hidden_size, num_label_token)
-        self.label_mlp = nn.Sequential(
-            nn.Linear(hidden_size, label_mid_hidden_size, bias=True), 
-            nn.SiLU(),
-            nn.Linear(label_mid_hidden_size, num_label_token * hidden_size, bias=True)
-        )
     
     @torch.compile
-    def forward(self, x, t, y, feat_rope=None):
-        B, N, D = x.shape
-        t = self.timestep_mlp(t).reshape(B, self.num_timestep_token, -1)
-        y = self.label_mlp(y).reshape(B, self.num_label_token, -1)
-
-        x = torch.concat([t, y, x], dim=1)
-        x = x + self.attn(self.norm1(x), rope=feat_rope, rope_begin=self.rope_begin)
+    def forward(self, x, feat_rope=None, rope_begin=0):
+        x = x + self.attn(self.norm1(x), rope=feat_rope, rope_begin=rope_begin)
         x = x + self.mlp(self.norm2(x))
-        t, y, x = torch.split(x, [self.num_timestep_token, self.num_label_token, N], dim=1)
-        return x, t, y
+        return x
 
 class FinalLayer(nn.Module):
     """
@@ -264,16 +242,10 @@ class FinalLayer(nn.Module):
         else:
             self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(hidden_size, 2 * hidden_size, bias=True)
-        )
+        
     @torch.compile
-    def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
-        x = modulate(self.norm_final(x), shift, scale)
-        x = self.linear(x)
-        return x
+    def forward(self, x):
+        return self.linear(self.norm_final(x))
 
 
 class MMDiT(nn.Module):
@@ -312,13 +284,20 @@ class MMDiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
+        self.num_timestep_token = num_timestep_token
+        self.num_label_token = num_label_token
+        self.rope_begin = num_timestep_token + num_label_token
+
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
-        self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
+        self.t_embedder = TimestepEmbedder(hidden_size, num_timestep_token)
+        self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob, num_label_token)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
+        
+        # Initialize AdaLN modulation
+        
         # use rotary position encoding, borrow from EVA
         if self.use_rope:
             half_head_dim = hidden_size // num_heads // 2
@@ -338,16 +317,17 @@ class MMDiT(nn.Module):
                 use_qknorm=use_qknorm, 
                 use_swiglu=use_swiglu, 
                 use_rmsnorm=use_rmsnorm,
-                num_timestep_token=num_timestep_token, 
-                num_label_token=num_label_token, 
                 ) for i in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
         self.initialize_weights()
+
     def get_trainable_modules(self):
         return [self.x_embedder, self.t_embedder, self.y_embedder, self.blocks, self.final_layer]
+    
     def get_last_layer(self):
         return self.final_layer.linear.weight
+    
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
@@ -367,25 +347,16 @@ class MMDiT(nn.Module):
         nn.init.constant_(self.x_embedder.proj.bias, 0)
 
         # Initialize label embedding table:
-        nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
+        for m in self.y_embedder.embedding_table:
+            nn.init.normal_(m.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
-        # Zero-out adaLN modulation layers in DiT blocks:
-        for block in self.blocks:
-            nn.init.normal_(block.timestep_mlp[0].weight, std=0.02)
-            nn.init.normal_(block.timestep_mlp[2].weight, std=0.02)
-            nn.init.normal_(block.label_mlp[0].weight, std=0.02)
-            nn.init.normal_(block.label_mlp[2].weight, std=0.02)
 
         # Zero-out output layers:
-        nn.init.normal_(self.final_layer.adaLN_modulation[-1].weight, std=0.02)
-        # nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
         nn.init.normal_(self.final_layer.linear.weight, std=0.02)
-        # nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
     def unpatchify(self, x):
@@ -412,17 +383,19 @@ class MMDiT(nn.Module):
         use_checkpoint: boolean to toggle checkpointing
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)                   # (N, D)
-        y = self.y_embedder(y, self.training)    # (N, D)
+        t = self.t_embedder(t)                   # (N, m, D)
+        y = self.y_embedder(y, self.training)    # (N, n, D)
+        B, N, D = x.shape
+        x = torch.concat([t, y, x], dim=1)
         
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
-                x, t, y = checkpoint(block, x, t, y, self.feat_rope, use_reentrant=True)
+                x = checkpoint(block, x, self.feat_rope, self.rope_begin, use_reentrant=True)
             else:
-                x, t, y = block(x, t, y, self.feat_rope)
+                x = block(x, self.feat_rope, self.rope_begin)
 
-        c = t.mean(1) + y.mean(1)                                # (N, D)
-        return x, t, c
+        t, y, x = torch.split(x, [self.num_timestep_token, self.num_label_token, N], dim=1)
+        return x, t, y
 
     def forward(self, x, t=None, y=None, **kwargs):
         """
@@ -432,9 +405,9 @@ class MMDiT(nn.Module):
         y: (N,) tensor of class labels
         use_checkpoint: boolean to toggle checkpointing
         """
-        x, _, c = self.forward_feature(x, t, y, **kwargs)
+        x, t, y = self.forward_feature(x, t, y, **kwargs)
 
-        x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
+        x = self.final_layer(x)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
         return x
@@ -571,7 +544,7 @@ if __name__ == '__main__':
     from tokenizer import VAE_Models
     from transport import create_transport, Sampler
 
-    config_path = 'configs/flow_s_1000kx1024_sdvae_t1y1.yaml'
+    config_path = 'configs/flow_b_1000kx1024_sdvae_t4y4.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     # Create model:

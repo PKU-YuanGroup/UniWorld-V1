@@ -8,7 +8,7 @@ pip install -e .
 # extract feature
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
     --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/train \
@@ -23,7 +23,7 @@ torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
 
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
     --data_path /data/OpenDataLab___ImageNet-1K/raw/ImageNet-1K/train \
@@ -44,20 +44,20 @@ torchrun --nproc_per_node 8 --master_port 29502 -m tools.extract_features \
 ### single node
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
-TORCH_DISTRIBUTED_DEBUG="DETAIL" accelerate launch \
+accelerate launch \
     --main_process_ip 127.0.0.1 \
     --main_process_port 1236 \
     --machine_rank 0 \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/flow_s_1000kx1024_sdvae_t1y1.yaml
+    --config configs/flow_b_1000kx1024_sdvae_t1y4.yaml
 ```
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
     --main_process_ip 127.0.0.1 \
@@ -68,7 +68,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 accelerate launch \
     train_disc.py \
     --config configs/flow_s_1000kx1024_sdvae_disc_ada_drop0p3_dt0p01.yaml
 
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch \
     --main_process_ip 127.0.0.1 \
@@ -83,7 +83,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 accelerate launch \
 ### multi node
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
@@ -91,7 +91,7 @@ accelerate launch \
     train.py \
     --config configs/flow_s_1000kx1024_sdvae.yaml
 
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
@@ -103,7 +103,7 @@ accelerate launch \
 ## tokenizer
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
@@ -116,7 +116,7 @@ accelerate launch \
 ```
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
@@ -124,7 +124,7 @@ accelerate launch \
     train_flowvae.py \
     --config configs/flowsdvae_500kx512_lgn0p0_cross.yaml
 
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
@@ -132,7 +132,7 @@ accelerate launch \
     train_flowvae.py \
     --config configs/flowsdvae_500kx512_lgn0p0_cross.yaml
 
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
@@ -140,7 +140,7 @@ accelerate launch \
     train_flowvae.py \
     --config configs/flowsdvae_500kx512_lgn0p0.yaml
 
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --config_file configs/accelerate_configs/multi_node_example_by_ddp.yaml \
@@ -154,7 +154,7 @@ accelerate launch \
 ## demo
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
@@ -167,26 +167,12 @@ accelerate launch \
     --demo 
 ```
 
-### flowvae
-```
-cd /storage/lb/FlowWorld
-conda activate dit_lb
-accelerate launch \
-    --main_process_ip 127.0.0.1 \
-    --main_process_port 1234 \
-    --machine_rank 0 \
-    --num_processes 8 \
-    --num_machines 1 \
-    tools/evaluate_flowvae.py \
-    --config configs/flowsdvae_500kx512_lgn0p0.yaml \
-    --demo 
-```
 
 ## batch inference
 
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
@@ -195,11 +181,11 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     inference.py \
-    --config configs/flow_s_1000kx1024_sdvae.yaml
+    --config configs/flow_b_1000kx1024_sdvae.yaml
 ```
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
@@ -227,7 +213,7 @@ pip install nvidia-cublas-cu12 nvidia-cuda-cupti-cu12 nvidia-cuda-runtime-cu12 n
 
 ## fid
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb_eval
 python tools/evaluator.py \
     /data/checkpoints/VIRTUAL_imagenet256_labeled.npz \
@@ -238,7 +224,7 @@ python tools/evaluator.py \
 
 # eval tokenizer
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \
@@ -255,7 +241,7 @@ accelerate launch \
 ```
 
 ```
-cd /storage/lb/FlowWorld
+cd /data/FlowWorld
 conda activate dit_lb
 accelerate launch \
     --main_process_ip 127.0.0.1 \

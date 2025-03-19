@@ -303,7 +303,11 @@ if __name__ == "__main__":
         in_channels=train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4,
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
+        num_timestep_token=train_config['model']['num_timestep_token'] if 'num_timestep_token' in train_config['model'] else 1,
+        num_label_token=train_config['model']['num_label_token'] if 'num_label_token' in train_config['model'] else 1,
     )
+    if 'without_timestep' in train_config['model']:
+        kwargs.update(dict(without_timestep=train_config['model']['without_timestep']))
     model = Models[train_config['model']['model_type']](**kwargs)
 
     checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)

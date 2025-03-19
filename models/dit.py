@@ -277,6 +277,7 @@ class DiT(nn.Module):
         use_rope=False,
         use_rmsnorm=False,
         use_checkpoint=False,
+        without_timestep=False, 
         **kwargs,
     ):
         super().__init__()
@@ -290,8 +291,10 @@ class DiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
+        self.without_timestep = without_timestep
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
-        self.t_embedder = TimestepEmbedder(hidden_size)
+        if not without_timestep:
+            self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -320,10 +323,7 @@ class DiT(nn.Module):
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels, use_rmsnorm=use_rmsnorm)
         self.initialize_weights()
-    def get_trainable_modules(self):
-        return [self.x_embedder, self.t_embedder, self.y_embedder, self.blocks, self.final_layer]
-    def get_last_layer(self):
-        return self.final_layer.linear.weight
+
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
@@ -346,8 +346,9 @@ class DiT(nn.Module):
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
-        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        if not self.without_timestep:
+            nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+            nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -384,9 +385,10 @@ class DiT(nn.Module):
         use_checkpoint: boolean to toggle checkpointing
         """
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        t = self.t_embedder(t)                   # (N, D)
+        if not self.without_timestep:
+            t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y                                # (N, D)
+        c = t + y if not self.without_timestep else y                                # (N, D)
         
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
@@ -542,7 +544,7 @@ if __name__ == '__main__':
     from tokenizer import VAE_Models
     from transport import create_transport, Sampler
 
-    config_path = 'configs/flow_s_1000kx1024_sdvae.yaml'
+    config_path = 'configs/flow_b_1000kx1024_sdvae_wots.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     # Create model:
@@ -562,23 +564,24 @@ if __name__ == '__main__':
         use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
         in_channels=in_channels, 
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
+        without_timestep=train_config['model']['without_timestep'] if 'without_timestep' in train_config['model'] else False,
     )
 
     ckpt_dir = train_config['ckpt_path']
-    checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
-    if "ema" in checkpoint:  # supports checkpoints from train.py
-        checkpoint = checkpoint["ema"]
+    # checkpoint = torch.load(ckpt_dir, map_location=lambda storage, loc: storage)
+    # if "ema" in checkpoint:  # supports checkpoints from train.py
+    #     checkpoint = checkpoint["ema"]
     # if "model" in checkpoint:  # supports checkpoints from train.py
     #     checkpoint = checkpoint["model"]
     #     checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
-    model.load_state_dict(checkpoint, strict=False)
+    # model.load_state_dict(checkpoint, strict=False)
     model.eval()  # important!
     model.cuda()
 
-    vae = VAE_Models[train_config['vae']['vae_type']](train_config['vae']['model_path'])
+    # vae = VAE_Models[train_config['vae']['vae_type']](train_config['vae']['model_path'])
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-
+    import sys;sys.exit()
     bsz = 256
     x = torch.rand(bsz, in_channels, latent_size, latent_size).cuda()
     t = torch.rand(bsz).cuda()

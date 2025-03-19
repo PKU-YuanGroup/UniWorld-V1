@@ -108,9 +108,11 @@ def do_train(train_config, accelerator):
         in_channels=train_config['model']['in_chans'] if 'in_chans' in train_config['model'] else 4,
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
         learn_sigma=train_config['diffusion']['learn_sigma'] if use_diffusion and 'learn_sigma' in train_config['diffusion'] else False,
+        num_timestep_token=train_config['model']['num_timestep_token'] if 'num_timestep_token' in train_config['model'] else 1,
+        num_label_token=train_config['model']['num_label_token'] if 'num_label_token' in train_config['model'] else 1,
     )
-    if 'decoder' in train_config['model']:
-        kwargs.update(dict(decoder=train_config['model']['decoder']))
+    if 'without_timestep' in train_config['model']:
+        kwargs.update(dict(without_timestep=train_config['model']['without_timestep']))
     model = Models[train_config['model']['model_type']](**kwargs)
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
@@ -134,7 +136,7 @@ def do_train(train_config, accelerator):
                     param.requires_grad = True
                     break
     
-    model = DDP(model.to(device), device_ids=[device], find_unused_parameters=True)
+    model = DDP(model.to(device), device_ids=[device])
 
     if use_diffusion:
         diffusion = create_diffusion(
