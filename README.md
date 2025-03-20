@@ -53,7 +53,7 @@ accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
     train.py \
-    --config configs/flow_b_1000kx1024_sdvae_t1y4.yaml
+    --config configs/flow_b_1000kx1024_sdvae_sf0p75.yaml
 ```
 
 ```

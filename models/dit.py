@@ -277,7 +277,7 @@ class DiT(nn.Module):
         use_rope=False,
         use_rmsnorm=False,
         use_checkpoint=False,
-        without_timestep=False, 
+        shuffle_ratio=0.0, 
         **kwargs,
     ):
         super().__init__()
@@ -291,10 +291,9 @@ class DiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
-        self.without_timestep = without_timestep
+        self.shuffle_ratio = shuffle_ratio
         self.x_embedder = PatchEmbed(input_size, patch_size, in_channels, hidden_size, bias=True)
-        if not without_timestep:
-            self.t_embedder = TimestepEmbedder(hidden_size)
+        self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -346,9 +345,8 @@ class DiT(nn.Module):
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
 
         # Initialize timestep embedding MLP:
-        if not self.without_timestep:
-            nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-            nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
 
         # Zero-out adaLN modulation layers in DiT blocks:
         for block in self.blocks:
@@ -375,6 +373,43 @@ class DiT(nn.Module):
         x = torch.einsum('nhwpqc->nchpwq', x)
         imgs = x.reshape(shape=(x.shape[0], c, h * p, h * p))
         return imgs
+    
+    def shuffle_pos_embed(self, x):
+        """
+        仅对 batch 内的 token 维度 (N) 进行部分打乱，并支持恢复原顺序。
+
+        参数：
+        - x: Tensor，形状 (B, N, D)
+        - shuffle_ratio: 需要打乱的 token 占比 (0~1)，默认 50%。
+
+        返回：
+        - x_shuffled: 处理后的 Tensor，形状 (B, N, D)
+        - x_restored: 还原后的 Tensor，形状 (B, N, D)，应与 `x` 相同
+        """
+        if not self.training or self.shuffle_ratio <= 0:
+            return x, None
+        B, N, D = x.shape
+
+        # === Step 1: 生成每个样本的随机 mask，选择要打乱的 token ===
+        shuffle_mask = torch.rand(B, N, device=x.device) < self.shuffle_ratio  # B x N，True 表示要打乱
+
+        # === Step 2: 生成 shuffle 索引 ===
+        indices = torch.arange(N, device=x.device).repeat(B, 1)  # B x N，原始索引
+        shuffle_indices = indices.clone()
+
+        for i in range(B):
+            mask = shuffle_mask[i]  # 选中的 token
+            shuffled_tokens = indices[i, mask][torch.randperm(mask.sum())]  # 只打乱 mask 选中的部分
+            shuffle_indices[i, mask] = shuffled_tokens  # 只替换打乱的部分
+
+        # === Step 3: 使用 `gather` 进行并行 shuffle ===
+        x_shuffled = torch.gather(x, dim=1, index=shuffle_indices.unsqueeze(-1).expand(-1, -1, D))
+
+        # === Step 4: 计算反向索引 ===
+        restore_indices = torch.argsort(shuffle_indices, dim=1)
+        # for i in shuffle_indices:
+        #     print(i)
+        return x_shuffled, restore_indices
 
     def forward_feature(self, x, t=None, y=None, **kwargs):
         """
@@ -384,17 +419,22 @@ class DiT(nn.Module):
         y: (N,) tensor of class labels
         use_checkpoint: boolean to toggle checkpointing
         """
-        x = self.x_embedder(x) + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
-        if not self.without_timestep:
-            t = self.t_embedder(t)                   # (N, D)
+        x, restore_indices = self.shuffle_pos_embed(self.x_embedder(x))
+        x = x + self.pos_embed  # (N, T, D), where T = H * W / patch_size ** 2
+        t = self.t_embedder(t)                   # (N, D)
         y = self.y_embedder(y, self.training)    # (N, D)
-        c = t + y if not self.without_timestep else y                                # (N, D)
+        c = t + y                                # (N, D)
         
         for idx, block in enumerate(self.blocks):
             if self.use_checkpoint:
                 x = checkpoint(block, x, c, self.feat_rope, use_reentrant=True)
             else:
                 x = block(x, c, self.feat_rope)
+        
+        # if restore_indices is not None:
+        #     x_restored = torch.gather(x, dim=1, index=restore_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+        #     return x_restored, t, c
+
         return x, t, c
 
     def forward(self, x, t=None, y=None, **kwargs):
@@ -544,7 +584,7 @@ if __name__ == '__main__':
     from tokenizer import VAE_Models
     from transport import create_transport, Sampler
 
-    config_path = 'configs/flow_b_1000kx1024_sdvae_wots.yaml'
+    config_path = 'configs/flow_b_1000kx1024_sdvae_sf0p5.yaml'
     with open(config_path, "r") as f:
         train_config = yaml.safe_load(f)
     # Create model:
@@ -564,7 +604,7 @@ if __name__ == '__main__':
         use_rmsnorm=train_config['model']['use_rmsnorm'] if 'use_rmsnorm' in train_config['model'] else False,
         in_channels=in_channels, 
         use_checkpoint=train_config['model']['use_checkpoint'] if 'use_checkpoint' in train_config['model'] else False,
-        without_timestep=train_config['model']['without_timestep'] if 'without_timestep' in train_config['model'] else False,
+        shuffle_ratio=train_config['model']['shuffle_ratio'] if 'shuffle_ratio' in train_config['model'] else 0.0,
     )
 
     ckpt_dir = train_config['ckpt_path']
@@ -575,20 +615,20 @@ if __name__ == '__main__':
     #     checkpoint = checkpoint["model"]
     #     checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
     # model.load_state_dict(checkpoint, strict=False)
-    model.eval()  # important!
+    model.train()  # important!
     model.cuda()
 
     # vae = VAE_Models[train_config['vae']['vae_type']](train_config['vae']['model_path'])
     print(model)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-    import sys;sys.exit()
-    bsz = 256
+    bsz = 4
     x = torch.rand(bsz, in_channels, latent_size, latent_size).cuda()
     t = torch.rand(bsz).cuda()
     y = torch.randint(0, 1000, (bsz, )).cuda()
 
-    # logit = model(x, t, y)
-    # print(logit.shape)
+    logit = model(x, t, y)
+    print(logit.shape)
+    import sys;sys.exit()
     
     transport = create_transport(
         train_config['transport']['path_type'],

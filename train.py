@@ -111,8 +111,8 @@ def do_train(train_config, accelerator):
         num_timestep_token=train_config['model']['num_timestep_token'] if 'num_timestep_token' in train_config['model'] else 1,
         num_label_token=train_config['model']['num_label_token'] if 'num_label_token' in train_config['model'] else 1,
     )
-    if 'without_timestep' in train_config['model']:
-        kwargs.update(dict(without_timestep=train_config['model']['without_timestep']))
+    if 'shuffle_ratio' in train_config['model']:
+        kwargs.update(dict(shuffle_ratio=train_config['model']['shuffle_ratio']))
     model = Models[train_config['model']['model_type']](**kwargs)
 
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
