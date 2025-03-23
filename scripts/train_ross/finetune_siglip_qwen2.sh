@@ -14,10 +14,10 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NCCL_IB_RETRY_CNT=32
 export TOKENIZERS_PARALLELISM=false
-unset LD_LIBRARY_PATH
+
 
 cd /storage/lb/ross
-conda activate ross_lb
+conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2-7B-Instruct"
@@ -33,8 +33,8 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 4 \
+    --per_device_train_batch_size 8 \
+    --gradient_accumulation_steps 2 \
     --learning_rate 2e-5 \
     --warmup_ratio 0.03 \
     \
@@ -53,8 +53,6 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --mm_projector_type mlp2x_gelu \
     --mm_inv_projector_type denoiser_vit3x \
     --mm_vision_select_layer -2 \
-    --mm_use_im_start_end False \
-    --mm_use_im_patch_token False \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
@@ -69,7 +67,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 32768 \
+    --model_max_length 4096 \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \

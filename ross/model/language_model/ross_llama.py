@@ -34,6 +34,36 @@ from transformers.generation.utils import GenerateOutput
 
 from ..ross_arch import RossMetaModel, RossMetaForCausalLM, CausalLMOutputWithPastWithVM
 
+from transformers.models.llama import modeling_llama
+
+class CompiledLlamaMLP(modeling_llama.LlamaMLP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+class CompiledLlamaRMSNorm(modeling_llama.LlamaRMSNorm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+
+class CompiledLlamaRotaryEmbedding(modeling_llama.LlamaRotaryEmbedding):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    @torch.no_grad()
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+modeling_llama.LlamaMLP = CompiledLlamaMLP
+modeling_llama.LlamaRMSNorm = CompiledLlamaRMSNorm
+modeling_llama.LlamaRotaryEmbedding = CompiledLlamaRotaryEmbedding
 
 class RossConfig(LlamaConfig):
     model_type = "ross_llama"
@@ -77,6 +107,7 @@ class RossLlamaForCausalLM(LlamaForCausalLM, RossMetaForCausalLM):
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if inputs_embeds is None:
             (
@@ -117,6 +148,7 @@ class RossLlamaForCausalLM(LlamaForCausalLM, RossMetaForCausalLM):
             eoi_ids=eoi_ids,
             images=images,
             cache_position=cache_position,
+            **kwargs,
         )
 
     def inner_forward(
@@ -135,6 +167,7 @@ class RossLlamaForCausalLM(LlamaForCausalLM, RossMetaForCausalLM):
         eoi_ids: Optional[torch.LongTensor] = None,
         images: Optional[torch.FloatTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         # mostly obtained from https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
         r"""
@@ -180,6 +213,7 @@ class RossLlamaForCausalLM(LlamaForCausalLM, RossMetaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            **kwargs,
         )
 
         hidden_states = outputs[0]
@@ -193,17 +227,7 @@ class RossLlamaForCausalLM(LlamaForCausalLM, RossMetaForCausalLM):
 
         loss, lm_loss = None, None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = nn.CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
             lm_loss = loss.detach().clone()
 
         vm_loss = None

@@ -7,7 +7,6 @@ from .base import BaseModel
 from ..smp import *
 from ..dataset import DATASET_TYPE
 
-
 class Ross(BaseModel):
 
     INSTALL_REQ = True
@@ -35,12 +34,15 @@ class Ross(BaseModel):
         self.model.eval()
         self.model.cuda()
 
-        if 'Qwen2'in model_path:
-            self.conv_mode = 'v1_qwen2'
+        if 'qwen2'in model_path.lower():
+            self.conv_mode = 'qwen_2'
         elif 'llama3' in model_path.lower():
             self.conv_mode = 'llama3'
         else:
             self.conv_mode = 'llava_v1'
+        
+        if getattr(self.model.config, 'conv_mode', False):
+            self.conv_mode = self.model.config.conv_mode
 
         kwargs_default = dict(
             do_sample=False,
@@ -133,10 +135,7 @@ class Ross(BaseModel):
             if msg['type'] == 'text':
                 content += msg['value']
             elif msg['type'] == 'image':
-                if self.model.config.mm_use_im_start_end:
-                    content += DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n'
-                else:
-                    content += DEFAULT_IMAGE_TOKEN + '\n'
+                content += DEFAULT_IMAGE_TOKEN + '\n'
                 images.append(msg['value'])
 
         images = [Image.open(s).convert('RGB') for s in images]

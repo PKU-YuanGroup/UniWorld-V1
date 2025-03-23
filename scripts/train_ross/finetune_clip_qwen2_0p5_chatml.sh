@@ -15,16 +15,16 @@ export MKL_NUM_THREADS=1
 export NCCL_IB_RETRY_CNT=32
 export TOKENIZERS_PARALLELISM=false
 
-
 cd /storage/lb/ross
 conda activate ross_env
-JSON_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA/train_json"
-IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
+JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
+IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2-0.5B-Instruct"
 VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
 VISION_DECODER="/storage/lb/checkpoints/pretrained_vae"
-OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-newenv"
-RUN_NAME="ross-clip-qwen2-0p5b-pt558k-newenv"
+PRETRAIN_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k-chatml-newenv-fa"
+RUN_NAME="ross-clip-qwen2-0p5b-pt558k-sft737k-chatml-newenv-fa"
 
 mkdir -p ${OUTPUT_DIR}
 
@@ -32,32 +32,36 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 32 \
-    --gradient_accumulation_steps 1 \
-    --learning_rate 1e-3 \
+    --per_device_train_batch_size 4 \
+    --gradient_accumulation_steps 4 \
+    --learning_rate 2e-5 \
     --warmup_ratio 0.03 \
     \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path ${LLM} \
+    --pretrain_mm_mlp_adapter ${PRETRAIN_DIR}/mm_projector.bin \
+    --pretrain_mm_inv_mlp_adapter ${PRETRAIN_DIR}/mm_inv_projector.bin \
     --output_dir ${OUTPUT_DIR} \
     --vision_tower ${VISION_ENCODER} \
-    --version plain \
+    --version qwen_chatml \
     --mm_pixel_decoder ${VISION_DECODER} \
     \
-    --data_path ${JSON_FOLDER}/llava_image_.json \
+    --data_path ${JSON_FOLDER}/Cambrian737k.json \
     --image_folder ${IMAGE_FOLDER} \
     \
     --mm_projector_type mlp2x_gelu \
-    --tune_mm_mlp_adapter True \
     --mm_inv_projector_type denoiser_vit3x \
     --mm_vision_select_layer -2 \
+    --image_aspect_ratio pad \
+    --group_by_modality_length True \
     --bf16 True \
     --num_train_epochs 1 \
     --per_device_eval_batch_size 4 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 24000 \
+    --save_steps 1000 \
     --save_total_limit 1 \
+    --save_only_model \
     --weight_decay 0. \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \

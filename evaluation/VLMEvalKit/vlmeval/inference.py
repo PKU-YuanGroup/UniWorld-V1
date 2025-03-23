@@ -26,7 +26,10 @@ def infer_data_api(model, work_dir, model_name, dataset, index_set=None, api_npr
     if index_set is not None:
         data = data[data['index'].isin(index_set)]
 
-    model = supported_VLM[model_name]() if isinstance(model, str) else model
+    if 'ross' in model_name.lower():
+        model = supported_VLM['ross'](model_name) if isinstance(model, str) else model
+    else:
+        model = supported_VLM[model_name]() if isinstance(model, str) else model
     assert getattr(model, 'is_api', False)
     if hasattr(model, 'set_dump_image'):
         model.set_dump_image(dataset.dump_image)
@@ -45,7 +48,7 @@ def infer_data_api(model, work_dir, model_name, dataset, index_set=None, api_npr
 
     # structs = [dataset.build_prompt(data.iloc[i]) for i in range(lt)]
 
-    out_file = f'{work_dir}/{model_name}_{dataset_name}_supp.pkl'
+    out_file = f'{work_dir}/{dataset_name}_supp.pkl'
     res = {}
     if osp.exists(out_file):
         res = load(out_file)
@@ -70,7 +73,7 @@ def infer_data_api(model, work_dir, model_name, dataset, index_set=None, api_npr
 
 def infer_data(model, model_name, work_dir, dataset, out_file, verbose=False, api_nproc=4):
     dataset_name = dataset.dataset_name
-    prev_file = f'{work_dir}/{model_name}_{dataset_name}_PREV.pkl'
+    prev_file = f'{work_dir}/{dataset_name}_PREV.pkl'
     res = load(prev_file) if osp.exists(prev_file) else {}
     if osp.exists(out_file):
         res.update(load(out_file))
@@ -96,7 +99,10 @@ def infer_data(model, model_name, work_dir, dataset, out_file, verbose=False, ap
     data = data[~data['index'].isin(res)]
     lt = len(data)
 
-    model = supported_VLM[model_name]() if isinstance(model, str) else model
+    if 'ross' in model_name.lower():
+        model = supported_VLM['ross'](model_name) if isinstance(model, str) else model
+    else:
+        model = supported_VLM[model_name]() if isinstance(model, str) else model
 
     is_api = getattr(model, 'is_api', False)
     if is_api:
@@ -146,9 +152,9 @@ def infer_data(model, model_name, work_dir, dataset, out_file, verbose=False, ap
 def infer_data_job(model, work_dir, model_name, dataset, verbose=False, api_nproc=4, ignore_failed=False):
     rank, world_size = get_rank_and_world_size()
     dataset_name = dataset.dataset_name
-    result_file = osp.join(work_dir, f'{model_name}_{dataset_name}.xlsx')
+    result_file = osp.join(work_dir, f'{dataset_name}.xlsx')
 
-    prev_file = f'{work_dir}/{model_name}_{dataset_name}_PREV.pkl'
+    prev_file = f'{work_dir}/{dataset_name}_PREV.pkl'
     if osp.exists(result_file):
         if rank == 0:
             data = load(result_file)

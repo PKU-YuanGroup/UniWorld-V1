@@ -21,18 +21,23 @@ conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA/train_json"
 IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2-0.5B-Instruct"
-VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
+VISION_ENCODER="/storage/lb/checkpoints/ConvLLaVA/LAION-CLIP-ConvNeXt-Large-512"
 VISION_DECODER="/storage/lb/checkpoints/pretrained_vae"
-OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-newenv"
-RUN_NAME="ross-clip-qwen2-0p5b-pt558k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/ross-conv-qwen2-0p5b-pt558k-newenv"
+RUN_NAME="ross-conv-qwen2-0p5b-pt558k-newenv"
 
+VISION_PATCH_SIZE=16
+PROJ_PATCH_SIZE=1
+TRAIN_FROM_SCRATCH=True
+UNFREEZE=True
+VISION_LR=1e-3
 mkdir -p ${OUTPUT_DIR}
 
-torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
+torchrun --nproc-per-node=1 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 32 \
+    --per_device_train_batch_size 4 \
     --gradient_accumulation_steps 1 \
     --learning_rate 1e-3 \
     --warmup_ratio 0.03 \
@@ -47,7 +52,12 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --data_path ${JSON_FOLDER}/llava_image_.json \
     --image_folder ${IMAGE_FOLDER} \
     \
-    --mm_projector_type mlp2x_gelu \
+    --mm_vision_patch_size ${VISION_PATCH_SIZE} \
+    --mm_projector_type conv2x_gelu_p${PROJ_PATCH_SIZE} \
+    --mm_train_from_scratch ${TRAIN_FROM_SCRATCH} \
+    --unfreeze_mm_vision_tower ${UNFREEZE} \
+    --mm_vision_tower_lr ${VISION_LR} \
+    \
     --tune_mm_mlp_adapter True \
     --mm_inv_projector_type denoiser_vit3x \
     --mm_vision_select_layer -2 \
@@ -56,7 +66,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --per_device_eval_batch_size 4 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 24000 \
+    --save_steps 2 \
     --save_total_limit 1 \
     --weight_decay 0. \
     --lr_scheduler_type "cosine" \
@@ -64,7 +74,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --tf32 True \
     --model_max_length 4096 \
     --gradient_checkpointing True \
-    --dataloader_num_workers 16 \
+    --dataloader_num_workers 0 \
     --lazy_preprocess True \
     --report_to wandb \
     --run_name ${RUN_NAME} >> ${OUTPUT_DIR}/log.txt

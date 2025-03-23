@@ -34,6 +34,37 @@ from transformers.generation.utils import GenerateOutput
 
 from ..ross_arch import RossMetaModel, RossMetaForCausalLM, CausalLMOutputWithPastWithVM
 
+from transformers.models.qwen2 import modeling_qwen2
+
+class CompiledQwen2MLP(modeling_qwen2.Qwen2MLP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+class CompiledQwen2RMSNorm(modeling_qwen2.Qwen2RMSNorm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+
+class CompiledQwen2RotaryEmbedding(modeling_qwen2.Qwen2RotaryEmbedding):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    @torch.no_grad()
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+modeling_qwen2.Qwen2MLP = CompiledQwen2MLP
+modeling_qwen2.Qwen2RMSNorm = CompiledQwen2RMSNorm
+modeling_qwen2.Qwen2RotaryEmbedding = CompiledQwen2RotaryEmbedding
+
 
 class RossConfig(Qwen2Config):
     model_type = "ross_qwen2"
@@ -77,6 +108,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if inputs_embeds is None:
             (
@@ -101,7 +133,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
             )
         else:
             boi_ids, eoi_ids = None, None
-
+        
         return self.inner_forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -117,6 +149,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
             eoi_ids=eoi_ids,
             images=images,
             cache_position=cache_position,
+            **kwargs,
         )
 
     def inner_forward(
@@ -135,6 +168,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
         eoi_ids: Optional[torch.LongTensor] = None,
         images: Optional[torch.FloatTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         # mostly obtained from https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2/modeling_qwen2.py
         r"""
@@ -180,26 +214,18 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            # cache_position=cache_position,
+            cache_position=cache_position,
+            **kwargs,
         )
 
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
 
+
         loss, lm_loss = None, None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = nn.CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            loss = loss_fct(shift_logits, shift_labels)
-
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
             lm_loss = loss.detach().clone()
 
         vm_loss = None

@@ -168,256 +168,258 @@ def main():
         date, commit_id = timestr('day'), githash(digits=8)
         eval_id = f"T{date}_G{commit_id}"
 
-        pred_root = osp.join(args.work_dir, model_name, eval_id)
-        pred_root_meta = osp.join(args.work_dir, model_name)
+        pred_root = osp.join(args.work_dir, eval_id)
+        pred_root_meta = osp.join(args.work_dir)
         os.makedirs(pred_root_meta, exist_ok=True)
 
-        prev_pred_roots = ls(osp.join(args.work_dir, model_name), mode='dir')
+        prev_pred_roots = ls(osp.join(args.work_dir), mode='dir')
         if len(prev_pred_roots) and args.reuse:
             prev_pred_roots.sort()
 
         if not osp.exists(pred_root):
             os.makedirs(pred_root, exist_ok=True)
-
+        print('pred_root', pred_root)
         if use_config:
             model = build_model_from_config(cfg['model'][model_name])
 
         for _, dataset_name in enumerate(args.data):
-            try:
-                result_file_base = f'{model_name}_{dataset_name}.xlsx'
+            # try:
+            result_file_base = f'{dataset_name}.xlsx'
+            print('result_file_base', result_file_base)
 
-                if use_config:
-                    if world_size > 1:
-                        if rank == 0:
-                            dataset = build_dataset_from_config(cfg['data'][dataset_name])
-                        dist.barrier()
-                    dataset = build_dataset_from_config(cfg['data'][dataset_name])
-                    if dataset is None:
-                        logger.error(f'Dataset {dataset_name} is not valid, will be skipped. ')
-                        continue
-                else:
-                    dataset_kwargs = {}
-                    if dataset_name in ['MMLongBench_DOC', 'DUDE', 'DUDE_MINI', 'SLIDEVQA', 'SLIDEVQA_MINI']:
-                        dataset_kwargs['model'] = model_name
-                    if dataset_name == 'MMBench-Video':
-                        dataset_kwargs['pack'] = args.pack
-                    if dataset_name == 'Video-MME':
-                        dataset_kwargs['use_subtitle'] = args.use_subtitle
+            if use_config:
+                if world_size > 1:
+                    if rank == 0:
+                        dataset = build_dataset_from_config(cfg['data'][dataset_name])
+                    dist.barrier()
+                dataset = build_dataset_from_config(cfg['data'][dataset_name])
+                if dataset is None:
+                    logger.error(f'Dataset {dataset_name} is not valid, will be skipped. ')
+                    continue
+            else:
+                dataset_kwargs = {}
+                if dataset_name in ['MMLongBench_DOC', 'DUDE', 'DUDE_MINI', 'SLIDEVQA', 'SLIDEVQA_MINI']:
+                    dataset_kwargs['model'] = model_name
+                if dataset_name == 'MMBench-Video':
+                    dataset_kwargs['pack'] = args.pack
+                if dataset_name == 'Video-MME':
+                    dataset_kwargs['use_subtitle'] = args.use_subtitle
 
-                    # If distributed, first build the dataset on the main process for doing preparation works
-                    if world_size > 1:
-                        if rank == 0:
-                            dataset = build_dataset(dataset_name, **dataset_kwargs)
-                        dist.barrier()
+                # If distributed, first build the dataset on the main process for doing preparation works
+                if world_size > 1:
+                    if rank == 0:
+                        dataset = build_dataset(dataset_name, **dataset_kwargs)
+                    dist.barrier()
 
-                    dataset = build_dataset(dataset_name, **dataset_kwargs)
-                    if dataset is None:
-                        logger.error(f'Dataset {dataset_name} is not valid, will be skipped. ')
-                        continue
-                    # Handling Video Datasets. For Video Dataset, set the fps for priority
-                    if args.fps > 0:
-                        if dataset_name == 'MVBench':
-                            raise ValueError('MVBench does not support fps setting, please transfer to MVBench_MP4!')
-                        args.nframe = 0
-                    if dataset_name in ['MMBench-Video']:
-                        packstr = 'pack' if args.pack else 'nopack'
-                        if args.nframe > 0:
-                            result_file_base = f'{model_name}_{dataset_name}_{args.nframe}frame_{packstr}.xlsx'
-                        else:
-                            result_file_base = f'{model_name}_{dataset_name}_{args.fps}fps_{packstr}.xlsx'
-                    elif dataset.MODALITY == 'VIDEO':
-                        if args.pack:
-                            logger.info(f'{dataset_name} not support Pack Mode, directly change to unpack')
-                            args.pack = False
-                        packstr = 'pack' if args.pack else 'nopack'
-                        if args.nframe > 0:
-                            result_file_base = f'{model_name}_{dataset_name}_{args.nframe}frame_{packstr}.xlsx'
-                        else:
-                            result_file_base = f'{model_name}_{dataset_name}_{args.fps}fps_{packstr}.xlsx'
-                        if dataset_name in ['Video-MME', 'LongVideoBench']:
-                            subtitlestr = 'subs' if args.use_subtitle else 'nosubs'
-                            result_file_base = result_file_base.replace('.xlsx', f'_{subtitlestr}.xlsx')
+                dataset = build_dataset(dataset_name, **dataset_kwargs)
+                if dataset is None:
+                    logger.error(f'Dataset {dataset_name} is not valid, will be skipped. ')
+                    continue
+                # Handling Video Datasets. For Video Dataset, set the fps for priority
+                if args.fps > 0:
+                    if dataset_name == 'MVBench':
+                        raise ValueError('MVBench does not support fps setting, please transfer to MVBench_MP4!')
+                    args.nframe = 0
+                if dataset_name in ['MMBench-Video']:
+                    packstr = 'pack' if args.pack else 'nopack'
+                    if args.nframe > 0:
+                        result_file_base = f'{dataset_name}_{args.nframe}frame_{packstr}.xlsx'
+                    else:
+                        result_file_base = f'{dataset_name}_{args.fps}fps_{packstr}.xlsx'
+                elif dataset.MODALITY == 'VIDEO':
+                    if args.pack:
+                        logger.info(f'{dataset_name} not support Pack Mode, directly change to unpack')
+                        args.pack = False
+                    packstr = 'pack' if args.pack else 'nopack'
+                    if args.nframe > 0:
+                        result_file_base = f'{dataset_name}_{args.nframe}frame_{packstr}.xlsx'
+                    else:
+                        result_file_base = f'{dataset_name}_{args.fps}fps_{packstr}.xlsx'
+                    if dataset_name in ['Video-MME', 'LongVideoBench']:
+                        subtitlestr = 'subs' if args.use_subtitle else 'nosubs'
+                        result_file_base = result_file_base.replace('.xlsx', f'_{subtitlestr}.xlsx')
 
-                # Handling Multi-Turn Dataset
-                if dataset.TYPE == 'MT':
-                    result_file_base = result_file_base.replace('.xlsx', '.tsv')
+            # Handling Multi-Turn Dataset
+            if dataset.TYPE == 'MT':
+                result_file_base = result_file_base.replace('.xlsx', '.tsv')
 
-                result_file = osp.join(pred_root, result_file_base)
+            result_file = osp.join(pred_root, result_file_base)
+            print('result_file', result_file)
 
-                # Reuse the previous prediction file if exists
-                if rank == 0 and len(prev_pred_roots):
+            # Reuse the previous prediction file if exists
+            if rank == 0 and len(prev_pred_roots):
+                prev_result_file = None
+                prev_pkl_file_list = []
+                for root in prev_pred_roots[::-1]:
+                    if osp.exists(osp.join(root, result_file_base)):
+                        prev_result_file = osp.join(root, result_file_base)
+                        break
+                    elif commit_id in root and len(ls(root)) and root != pred_root:
+                        temp_files = ls(root, match=[dataset_name, '.pkl'])
+                        if len(temp_files):
+                            prev_pkl_file_list.extend(temp_files)
+                            break
+                if not args.reuse:
                     prev_result_file = None
                     prev_pkl_file_list = []
-                    for root in prev_pred_roots[::-1]:
-                        if osp.exists(osp.join(root, result_file_base)):
-                            prev_result_file = osp.join(root, result_file_base)
-                            break
-                        elif commit_id in root and len(ls(root)) and root != pred_root:
-                            temp_files = ls(root, match=[dataset_name, '.pkl'])
-                            if len(temp_files):
-                                prev_pkl_file_list.extend(temp_files)
-                                break
-                    if not args.reuse:
-                        prev_result_file = None
-                        prev_pkl_file_list = []
-                    if prev_result_file is not None:
-                        logger.warning(
-                            f'--reuse is set, will reuse the prediction file {prev_result_file}.')
-                        if prev_result_file != result_file:
-                            shutil.copy(prev_result_file, result_file)
-                    elif len(prev_pkl_file_list):
-                        for fname in prev_pkl_file_list:
-                            target_path = osp.join(pred_root, osp.basename(fname))
-                            if not osp.exists(target_path):
-                                shutil.copy(fname, target_path)
-                                logger.info(f'--reuse is set, will reuse the prediction pickle file {fname}.')
-                            else:
-                                logger.warning(f'File already exists: {target_path}')
+                if prev_result_file is not None:
+                    logger.warning(
+                        f'--reuse is set, will reuse the prediction file {prev_result_file}.')
+                    if prev_result_file != result_file:
+                        shutil.copy(prev_result_file, result_file)
+                elif len(prev_pkl_file_list):
+                    for fname in prev_pkl_file_list:
+                        target_path = osp.join(pred_root, osp.basename(fname))
+                        if not osp.exists(target_path):
+                            shutil.copy(fname, target_path)
+                            logger.info(f'--reuse is set, will reuse the prediction pickle file {fname}.')
+                        else:
+                            logger.warning(f'File already exists: {target_path}')
 
-                if world_size > 1:
-                    dist.barrier()
+            if world_size > 1:
+                dist.barrier()
 
-                if model is None:
-                    model = model_name  # which is only a name
+            if model is None:
+                model = model_name  # which is only a name
 
-                # Perform the Inference
-                if dataset.MODALITY == 'VIDEO':
-                    model = infer_data_job_video(
-                        model,
-                        work_dir=pred_root,
-                        model_name=model_name,
-                        dataset=dataset,
-                        nframe=args.nframe,
-                        pack=args.pack,
-                        verbose=args.verbose,
-                        subtitle=args.use_subtitle,
-                        api_nproc=args.nproc,
-                        fps=args.fps)
-                elif dataset.TYPE == 'MT':
-                    model = infer_data_job_mt(
-                        model,
-                        work_dir=pred_root,
-                        model_name=model_name,
-                        dataset=dataset,
-                        verbose=args.verbose,
-                        api_nproc=args.nproc,
-                        ignore_failed=args.ignore)
-                else:
-                    model = infer_data_job(
-                        model,
-                        work_dir=pred_root,
-                        model_name=model_name,
-                        dataset=dataset,
-                        verbose=args.verbose,
-                        api_nproc=args.nproc,
-                        ignore_failed=args.ignore)
+            # Perform the Inference
+            if dataset.MODALITY == 'VIDEO':
+                model = infer_data_job_video(
+                    model,
+                    work_dir=pred_root,
+                    model_name=model_name,
+                    dataset=dataset,
+                    nframe=args.nframe,
+                    pack=args.pack,
+                    verbose=args.verbose,
+                    subtitle=args.use_subtitle,
+                    api_nproc=args.nproc,
+                    fps=args.fps)
+            elif dataset.TYPE == 'MT':
+                model = infer_data_job_mt(
+                    model,
+                    work_dir=pred_root,
+                    model_name=model_name,
+                    dataset=dataset,
+                    verbose=args.verbose,
+                    api_nproc=args.nproc,
+                    ignore_failed=args.ignore)
+            else:
+                model = infer_data_job(
+                    model,
+                    work_dir=pred_root,
+                    model_name=model_name,
+                    dataset=dataset,
+                    verbose=args.verbose,
+                    api_nproc=args.nproc,
+                    ignore_failed=args.ignore)
 
-                # Set the judge kwargs first before evaluation or dumping
+            # Set the judge kwargs first before evaluation or dumping
 
-                judge_kwargs = {
-                    'nproc': args.nproc,
-                    'verbose': args.verbose,
-                    'retry': args.retry if args.retry is not None else 3
-                }
+            judge_kwargs = {
+                'nproc': args.nproc,
+                'verbose': args.verbose,
+                'retry': args.retry if args.retry is not None else 3
+            }
 
-                if args.retry is not None:
-                    judge_kwargs['retry'] = args.retry
-                if args.judge is not None:
-                    judge_kwargs['model'] = args.judge
-                else:
-                    if dataset.TYPE in ['MCQ', 'Y/N']:
-                        judge_kwargs['model'] = 'chatgpt-0125'
-                    elif listinstr(['MMVet', 'LLaVABench', 'MMBench-Video'], dataset_name):
-                        judge_kwargs['model'] = 'gpt-4-turbo'
-                    elif listinstr(['MathVista', 'MathVerse', 'MathVision', 'DynaMath'], dataset_name):
-                        judge_kwargs['model'] = 'gpt-4o-mini'
-                    elif listinstr(['MMLongBench', 'MMDU', 'DUDE', 'SLIDEVQA', 'MIA-Bench', 'WildVision'], dataset_name):  # noqa: E501
-                        judge_kwargs['model'] = 'gpt-4o'
+            if args.retry is not None:
+                judge_kwargs['retry'] = args.retry
+            if args.judge is not None:
+                judge_kwargs['model'] = args.judge
+            else:
+                if dataset.TYPE in ['MCQ', 'Y/N']:
+                    judge_kwargs['model'] = 'chatgpt-0125'
+                elif listinstr(['MMVet', 'LLaVABench', 'MMBench-Video'], dataset_name):
+                    judge_kwargs['model'] = 'gpt-4-turbo'
+                elif listinstr(['MathVista', 'MathVerse', 'MathVision', 'DynaMath'], dataset_name):
+                    judge_kwargs['model'] = 'gpt-4o-mini'
+                elif listinstr(['MMLongBench', 'MMDU', 'DUDE', 'SLIDEVQA', 'MIA-Bench', 'WildVision'], dataset_name):  # noqa: E501
+                    judge_kwargs['model'] = 'gpt-4o'
 
-                if rank == 0:
-                    logger.info(judge_kwargs)
+            if rank == 0:
+                logger.info(judge_kwargs)
 
-                if world_size > 1:
-                    dist.barrier()
+            if world_size > 1:
+                dist.barrier()
 
-                # Only Rank 0 handles the evaluation part
-                if rank == 0:
-                    # Prepare Submission Files for MMMU_TEST AND MMT-Bench_ALL
-                    if dataset_name in ['MMMU_TEST']:
-                        result_json = MMMU_result_transfer(result_file)
-                        logger.info(f'Transfer MMMU_TEST result to json for official evaluation, '
-                                    f'json file saved in {result_json}')
-                        continue
-                    elif 'MMT-Bench_ALL' in dataset_name:
-                        submission_file = MMTBench_result_transfer(result_file, **judge_kwargs)
-                        logger.info(f'Extract options from prediction of MMT-Bench FULL split for official evaluation '
-                                    f'(https://eval.ai/web/challenges/challenge-page/2328/overview), '
-                                    f'submission file saved in {submission_file}')
-                        continue
+            # Only Rank 0 handles the evaluation part
+            if rank == 0:
+                # Prepare Submission Files for MMMU_TEST AND MMT-Bench_ALL
+                if dataset_name in ['MMMU_TEST']:
+                    result_json = MMMU_result_transfer(result_file)
+                    logger.info(f'Transfer MMMU_TEST result to json for official evaluation, '
+                                f'json file saved in {result_json}')
+                    continue
+                elif 'MMT-Bench_ALL' in dataset_name:
+                    submission_file = MMTBench_result_transfer(result_file, **judge_kwargs)
+                    logger.info(f'Extract options from prediction of MMT-Bench FULL split for official evaluation '
+                                f'(https://eval.ai/web/challenges/challenge-page/2328/overview), '
+                                f'submission file saved in {submission_file}')
+                    continue
 
-                    # Skip the evaluation part if only infer
-                    if args.mode == 'infer':
-                        continue
+                # Skip the evaluation part if only infer
+                if args.mode == 'infer':
+                    continue
 
-                    # Skip the evaluation part if the dataset evaluation is not supported or annotations are missing
-                    if 'MLLMGuard_DS' in dataset_name:
-                        logger.info('The evaluation of MLLMGuard_DS is not supported yet. ')
-                        continue
-                    elif 'AesBench_TEST' == dataset_name:
-                        logger.info(f'The results are saved in {result_file}. '
-                                    f'Please send it to the AesBench Team via huangyipo@hotmail.com.')
-                        continue
-                    elif dataset_name in ['DocVQA_TEST', 'InfoVQA_TEST', 'Q-Bench1_TEST', 'A-Bench_TEST']:
-                        logger.info(f'{dataset_name} is a test split without ground-truth. '
-                                    'Thus only the inference part is supported for those datasets. ')
-                        continue
-                    elif dataset_name in [
-                        'MMBench_TEST_CN', 'MMBench_TEST_EN', 'MMBench', 'MMBench_CN',
-                        'MMBench_TEST_CN_V11', 'MMBench_TEST_EN_V11', 'MMBench_V11', 'MMBench_CN_V11'
-                    ] and not MMBenchOfficialServer(dataset_name):
-                        logger.error(
-                            f'Can not evaluate {dataset_name} on non-official servers, will skip the evaluation.')
-                        continue
+                # Skip the evaluation part if the dataset evaluation is not supported or annotations are missing
+                if 'MLLMGuard_DS' in dataset_name:
+                    logger.info('The evaluation of MLLMGuard_DS is not supported yet. ')
+                    continue
+                elif 'AesBench_TEST' == dataset_name:
+                    logger.info(f'The results are saved in {result_file}. '
+                                f'Please send it to the AesBench Team via huangyipo@hotmail.com.')
+                    continue
+                elif dataset_name in ['DocVQA_TEST', 'InfoVQA_TEST', 'Q-Bench1_TEST', 'A-Bench_TEST']:
+                    logger.info(f'{dataset_name} is a test split without ground-truth. '
+                                'Thus only the inference part is supported for those datasets. ')
+                    continue
+                elif dataset_name in [
+                    'MMBench_TEST_CN', 'MMBench_TEST_EN', 'MMBench', 'MMBench_CN',
+                    'MMBench_TEST_CN_V11', 'MMBench_TEST_EN_V11', 'MMBench_V11', 'MMBench_CN_V11'
+                ] and not MMBenchOfficialServer(dataset_name):
+                    logger.error(
+                        f'Can not evaluate {dataset_name} on non-official servers, will skip the evaluation.')
+                    continue
 
-                    # Setup the proxy for the evaluation
-                    eval_proxy = os.environ.get('EVAL_PROXY', None)
-                    old_proxy = os.environ.get('HTTP_PROXY', '')
-                    if eval_proxy is not None:
-                        proxy_set(eval_proxy)
+                # Setup the proxy for the evaluation
+                eval_proxy = os.environ.get('EVAL_PROXY', None)
+                old_proxy = os.environ.get('HTTP_PROXY', '')
+                if eval_proxy is not None:
+                    proxy_set(eval_proxy)
 
-                    # Perform the Evaluation
-                    eval_results = dataset.evaluate(result_file, **judge_kwargs)
-                    # Display Evaluation Results in Terminal
-                    if eval_results is not None:
-                        assert isinstance(eval_results, dict) or isinstance(eval_results, pd.DataFrame)
-                        logger.info(f'The evaluation of model {model_name} x dataset {dataset_name} has finished! ')
-                        logger.info('Evaluation Results:')
-                        if isinstance(eval_results, dict):
-                            logger.info('\n' + json.dumps(eval_results, indent=4))
-                        elif isinstance(eval_results, pd.DataFrame):
-                            if len(eval_results) < len(eval_results.columns):
-                                eval_results = eval_results.T
-                            logger.info('\n' + tabulate(eval_results))
+                # Perform the Evaluation
+                eval_results = dataset.evaluate(result_file, **judge_kwargs)
+                # Display Evaluation Results in Terminal
+                if eval_results is not None:
+                    assert isinstance(eval_results, dict) or isinstance(eval_results, pd.DataFrame)
+                    logger.info(f'The evaluation of model {model_name} x dataset {dataset_name} has finished! ')
+                    logger.info('Evaluation Results:')
+                    if isinstance(eval_results, dict):
+                        logger.info('\n' + json.dumps(eval_results, indent=4))
+                    elif isinstance(eval_results, pd.DataFrame):
+                        if len(eval_results) < len(eval_results.columns):
+                            eval_results = eval_results.T
+                        logger.info('\n' + tabulate(eval_results))
 
-                    # Restore the proxy
-                    if eval_proxy is not None:
-                        proxy_set(old_proxy)
+                # Restore the proxy
+                if eval_proxy is not None:
+                    proxy_set(old_proxy)
 
-                    # Create the symbolic links for the prediction files
-                    files = os.listdir(pred_root)
-                    files = [x for x in files if f'{model_name}_{dataset_name}' in x]
-                    for f in files:
-                        cwd = os.getcwd()
-                        file_addr = osp.join(cwd, pred_root, f)
-                        link_addr = osp.join(cwd, pred_root_meta, f)
-                        if osp.exists(link_addr) or osp.islink(link_addr):
-                            os.remove(link_addr)
-                        os.symlink(file_addr, link_addr)
+                # Create the symbolic links for the prediction files
+                files = os.listdir(pred_root)
+                files = [x for x in files if f'{model_name}_{dataset_name}' in x]
+                for f in files:
+                    cwd = os.getcwd()
+                    file_addr = osp.join(cwd, pred_root, f)
+                    link_addr = osp.join(cwd, pred_root_meta, f)
+                    if osp.exists(link_addr) or osp.islink(link_addr):
+                        os.remove(link_addr)
+                    os.symlink(file_addr, link_addr)
 
-            except Exception as e:
-                logger.exception(f'Model {model_name} x Dataset {dataset_name} combination failed: {e}, '
-                                 'skipping this combination.')
-                continue
+            # except Exception as e:
+            #     logger.exception(f'Model {model_name} x Dataset {dataset_name} combination failed: {e}, '
+            #                      'skipping this combination.')
+            #     continue
 
             if world_size > 1:
                 dist.barrier()

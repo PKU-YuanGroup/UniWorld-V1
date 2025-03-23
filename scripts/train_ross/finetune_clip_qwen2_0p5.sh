@@ -14,18 +14,18 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NCCL_IB_RETRY_CNT=32
 export TOKENIZERS_PARALLELISM=false
-unset LD_LIBRARY_PATH
+
 
 cd /storage/lb/ross
-conda activate ross_lb
+conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2-0.5B-Instruct"
 VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
 VISION_DECODER="/storage/lb/checkpoints/pretrained_vae"
-PRETRAIN_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k"
-OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k"
-RUN_NAME="ross-clip-qwen2-0p5b-pt558k-sft737k"
+PRETRAIN_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k-newenv-fa"
+RUN_NAME="ross-clip-qwen2-0p5b-pt558k-sft737k-newenv-fa"
 
 mkdir -p ${OUTPUT_DIR}
 
@@ -53,8 +53,6 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --mm_projector_type mlp2x_gelu \
     --mm_inv_projector_type denoiser_vit3x \
     --mm_vision_select_layer -2 \
-    --mm_use_im_start_end False \
-    --mm_use_im_patch_token False \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
@@ -69,7 +67,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 32768 \
+    --model_max_length 4096 \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \

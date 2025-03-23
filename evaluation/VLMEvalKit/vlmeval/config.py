@@ -367,7 +367,7 @@ h2ovl_series = {
 }
 
 ross_series = {
-    'ross-qwen2-7b': partial(Ross, model_path='HaochenWang/ross-qwen2-7b'),
+    'ross': Ross,
 }
 
 supported_VLM = {}

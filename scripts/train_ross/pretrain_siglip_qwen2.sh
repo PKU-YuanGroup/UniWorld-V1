@@ -14,10 +14,10 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NCCL_IB_RETRY_CNT=32
 export TOKENIZERS_PARALLELISM=false
-unset LD_LIBRARY_PATH
+
 
 cd /storage/lb/ross
-conda activate ross_lb
+conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA/train_json"
 IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2-7B-Instruct"
@@ -32,8 +32,8 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 8 \
-    --gradient_accumulation_steps 4 \
+    --per_device_train_batch_size 32 \
+    --gradient_accumulation_steps 1 \
     --learning_rate 1e-3 \
     --warmup_ratio 0.03 \
     --mm_inv_projector_lr 1e-4 \
@@ -52,8 +52,6 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --tune_mm_mlp_adapter True \
     --mm_inv_projector_type denoiser_vit3x \
     --mm_vision_select_layer -2 \
-    --mm_use_im_start_end False \
-    --mm_use_im_patch_token False \
     --bf16 True \
     --num_train_epochs 1 \
     --per_device_eval_batch_size 4 \
@@ -65,7 +63,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 8192 \
+    --model_max_length 4096 \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \

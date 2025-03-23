@@ -88,11 +88,12 @@ class RossMetaModel:
             else:
                 vision_tower = self.vision_tower
             vision_tower.load_model()
-        self.image_embed_len = (self.vision_tower.config.image_size // self.vision_tower.config.patch_size) ** 2
+        # self.image_embed_len = (self.vision_tower.config.image_size // self.vision_tower.config.patch_size) ** 2
+        self.image_embed_len = (self.vision_tower.image_size() // self.vision_tower.patch_size()) ** 2
         self.config.image_embed_len = self.image_embed_len
         self.config.image_mean = self.vision_tower.image_processor.image_mean
         self.config.image_std = self.vision_tower.image_processor.image_std
-        self.config.decode_image_size = self.vision_tower.config.image_size // self.vision_tower.config.patch_size * 16  # 336 -> 384; 384 -> 432
+        self.config.decode_image_size = self.vision_tower.image_size() // self.vision_tower.patch_size() * 16  # 336 -> 384; 384 -> 432
 
         ### build CLIP-LLM projector
         self.config.use_mm_proj = True
@@ -274,10 +275,6 @@ class RossMetaForCausalLM(ABC):
         else:
             image_features = self.encode_images(images)
 
-        # TODO: image start / end is not implemented here to support pretraining.
-        if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
-            raise NotImplementedError
-
         # Let's just add dummy tensors if they do not exist,
         # it is a headache to deal with None all the time.
         # But it is not ideal, and if you have a better idea,
@@ -417,51 +414,6 @@ class RossMetaForCausalLM(ABC):
             attention_mask.shape[1], device=attention_mask.device)
 
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, boi_ids, eoi_ids, cache_position
-
-    def initialize_vision_tokenizer(self, model_args, tokenizer):
-        if model_args.mm_use_im_patch_token:
-            tokenizer.add_tokens([DEFAULT_IMAGE_PATCH_TOKEN], special_tokens=True)
-            self.resize_token_embeddings(len(tokenizer))
-
-        if model_args.mm_use_im_start_end:
-            num_new_tokens = tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
-            self.resize_token_embeddings(len(tokenizer))
-
-            if num_new_tokens > 0:
-                input_embeddings = self.get_input_embeddings().weight.data
-                output_embeddings = self.get_output_embeddings().weight.data
-
-                input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
-                    dim=0, keepdim=True)
-                output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
-                    dim=0, keepdim=True)
-
-                input_embeddings[-num_new_tokens:] = input_embeddings_avg
-                output_embeddings[-num_new_tokens:] = output_embeddings_avg
-
-            if model_args.tune_mm_mlp_adapter:
-                for p in self.get_input_embeddings().parameters():
-                    p.requires_grad = True
-                for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = False
-
-            if model_args.pretrain_mm_mlp_adapter:
-                mm_projector_weights = torch.load(model_args.pretrain_mm_mlp_adapter, map_location='cpu')
-                embed_tokens_weight = mm_projector_weights['model.embed_tokens.weight']
-                assert num_new_tokens == 2
-                if input_embeddings.shape == embed_tokens_weight.shape:
-                    input_embeddings[-num_new_tokens:] = embed_tokens_weight[-num_new_tokens:]
-                elif embed_tokens_weight.shape[0] == num_new_tokens:
-                    input_embeddings[-num_new_tokens:] = embed_tokens_weight
-                else:
-                    raise ValueError(
-                        f"Unexpected embed_tokens_weight shape. Pretrained: {embed_tokens_weight.shape}. Current: {input_embeddings.shape}. Numer of new tokens: {num_new_tokens}.")
-        elif model_args.mm_use_im_patch_token:
-            if model_args.tune_mm_mlp_adapter:
-                for p in self.get_input_embeddings().parameters():
-                    p.requires_grad = False
-                for p in self.get_output_embeddings().parameters():
-                    p.requires_grad = False
 
     def compute_vm_loss(
         self,

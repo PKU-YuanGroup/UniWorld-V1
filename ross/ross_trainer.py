@@ -231,7 +231,10 @@ class RossTrainer(Trainer):
 
         return self.optimizer
 
-    def _save_checkpoint(self, model, trial, metrics=None):
+    def _save_checkpoint(self, model, trial):
+        if getattr(self.args, 'unfreeze_mm_vision_tower', False):
+            import ipdb;ipdb.set_trace()
+
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
             checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
@@ -257,34 +260,40 @@ class RossTrainer(Trainer):
                 self.model.config.save_pretrained(output_dir)
                 torch.save(weight_to_save, os.path.join(output_dir, f'mm_inv_projector.bin'))
         else:
-            super(RossTrainer, self)._save_checkpoint(model, trial, metrics)
+            # self.model.generation_config.do_sample = True
+            super(RossTrainer, self)._save_checkpoint(model, trial)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         logger.info(f"=> saving to {output_dir}")
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
         else:
+            self.model.generation_config.do_sample = True
             super(RossTrainer, self)._save(output_dir, state_dict)
             
-    def compute_loss(self, model, inputs, return_outputs=False, *args, **kwargs):
-        loss, outputs = super().compute_loss(model, inputs, return_outputs=True)
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        loss, outputs = super().compute_loss(model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)
 
-        if self.state.global_step % (self.args.logging_steps * self.args.gradient_accumulation_steps) == 0:
-            self.last_lm_loss = getattr(outputs, 'lm_loss', None)
-            self.last_vm_loss = getattr(outputs, 'vm_loss', None)
+        if self.state.global_step == 0:
+            self.lm_loss = []
+        if self.state.global_step == 0:
+            self.vm_loss = []
+
+        # if self.state.global_step % (self.args.logging_steps * self.args.gradient_accumulation_steps) == 0:
+        lm_loss = getattr(outputs, 'lm_loss', False)
+        vm_loss = getattr(outputs, 'vm_loss', False)
+        if lm_loss:
+            self.lm_loss.append(lm_loss)
+        if vm_loss:
+            self.vm_loss.append(vm_loss)
 
         return (loss, outputs) if return_outputs else loss
     
-    def log(self, logs):
-        if self.last_lm_loss is not None:
-            logs["lm_loss"] = round(self.last_lm_loss.item(), 4)
-        if self.last_vm_loss is not None:
-            logs["vm_loss"] = round(self.last_vm_loss.item(), 4)
-        super().log(logs)
-
-
-
-    def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval):
-        grad_norm = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
-        grad_norm = round(grad_norm, 4)
-        super()._maybe_log_save_evaluate(tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval)
+    def log(self, logs, *args, **kwargs):
+        if getattr(self, 'lm_loss', False) and len(self.lm_loss) > 0:
+            logs["lm_loss"] = round(torch.stack(self.lm_loss).detach().sum().item(), 4)
+            self.lm_loss = []
+        if getattr(self, 'vm_loss', False) and len(self.vm_loss) > 0:
+            logs["vm_loss"] = round(torch.stack(self.vm_loss).detach().mean().item(), 4)
+            self.vm_loss = []
+        super().log(logs, *args, **kwargs)

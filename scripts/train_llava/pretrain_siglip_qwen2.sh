@@ -24,8 +24,6 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --tune_mm_mlp_adapter True \
     --mm_inv_projector_type denoiser_vit3x \
     --mm_vision_select_layer -2 \
-    --mm_use_im_start_end False \
-    --mm_use_im_patch_token False \
     --bf16 True \
     --num_train_epochs 1 \
     --per_device_eval_batch_size 4 \
@@ -37,7 +35,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 8192 \
+    --model_max_length 4096 \
     --gradient_checkpointing True \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \

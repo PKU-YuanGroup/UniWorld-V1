@@ -47,10 +47,7 @@ def process(line, args, tokenizer, image_processor, model_config, images):
     image_id = line["imageId"]
     input_image = images[image_id]
     if input_image is not None:
-        if model_config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-        else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+        qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
 
     conv = conv_templates[args.conv_mode].copy()
     conv.append_message(conv.roles[0], qs)
@@ -87,12 +84,15 @@ def eval_model(args):
     # disable_torch_init()  # DO NOT ENABLE THIS: KILLS PERFORMANCE
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(model_path, args.model_base, model_name)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(
+        model_path, args.model_base, model_name
+        )
 
     images = {}
-    for i in range(300):
-        file_path = hf_hub_download(repo_id="MMVP/MMVP", filename=f"{i + 1}.jpg", subfolder="MMVP Images",
-                                    repo_type="dataset")
+    for i in tqdm(range(300)):
+        # file_path = hf_hub_download(repo_id="MMVP/MMVP", filename=f"{i + 1}.jpg", subfolder="MMVP Images",
+        #                             repo_type="dataset")
+        file_path = f'/storage/lb/logs/ross/mmvp_cache/hub/datasets--MMVP--MMVP/snapshots/37eafecab8a3940c50c2ade5b36de69dbc99a8cf/MMVP Images/{i + 1}.jpg'
         images[i] = Image.open(file_path).convert('RGB')
 
     questions = []

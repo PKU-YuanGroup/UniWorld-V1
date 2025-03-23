@@ -1,6 +1,6 @@
 import torch.nn as nn
 from diffusers import AutoencoderKL
-
+import torch
 
 class FluxDecoder(nn.Module):
     def __init__(self, config, **kwargs):
@@ -24,8 +24,10 @@ class FluxDecoder(nn.Module):
     def latent_dim(self):
         return self.pixel_decoder.config.latent_channels * 4
 
+    @torch.compile
     def encode(self, x):
         return self.pixel_decoder.encode(x)
 
+    @torch.compile
     def decode(self, z):
         return self.pixel_decoder.decode(z)

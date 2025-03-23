@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import math
 from transformers import ConvNextModel, CLIPImageProcessor, ConvNextConfig
 
 
@@ -12,14 +12,14 @@ class ConvNeXtCLIPVisionTower(nn.Module):
 
         self.vision_tower_name = vision_tower
         self.select_layer = args.mm_vision_select_layer
-        self.update_resolution = getattr(args, 'mm_vision_resolution', 256)
+        self.mm_vision_resolution = getattr(args, 'mm_vision_resolution', 384)
+        self.mm_train_from_scratch = getattr(args, 'mm_train_from_scratch', False)
+        self.mm_vision_patch_size = max(getattr(args, 'mm_vision_patch_size', 16), 4)
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
         self.unfreeze = getattr(args, 'unfreeze_mm_vision_tower', False)
-
+        print('args', args)
         if not delay_load:
             self.load_model()
-        # elif self.unfreeze:
-        #     self.load_model()
         else:
             self.cfg_only = ConvNextConfig.from_pretrained(self.vision_tower_name)
         
@@ -29,10 +29,17 @@ class ConvNeXtCLIPVisionTower(nn.Module):
             return
 
         self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = ConvNextModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        if self.mm_train_from_scratch:
+            config = ConvNextConfig.from_pretrained(self.vision_tower_name)
+            self.vision_tower = ConvNextModel._from_config(config)
+        else:
+            self.vision_tower = ConvNextModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        assert not ((not self.unfreeze) and self.mm_train_from_scratch)
+        print('is train from scratch vision encoder?', self.mm_train_from_scratch)
+        print('is training?', self.unfreeze)
         self.vision_tower.requires_grad_(self.unfreeze)
         print(f"[debug]\tself.vision_tower.requires_grad="
-              f"{self.vision_tower.vision_model.embeddings.patch_embedding.weight.requires_grad}")
+              f"{self.vision_tower.embeddings.patch_embeddings.weight.requires_grad}")
 
         if pretrained is not None:
             print(f"=> loading pretrained mm_vision_tower from {self.pretrained} ...")
@@ -40,18 +47,15 @@ class ConvNeXtCLIPVisionTower(nn.Module):
 
         self.is_loaded = True
 
-        if self.select_layer == -2:
-            self.select_layer = -1
-            self.vision_tower.encoder.stages[-1].layers.pop(-1)
-            print(
-                f'Last block removed, select layer changed to {self.select_layer}')
+        self.cutoff_stage = int(math.log2(self.mm_vision_patch_size)) - 2
+        for _ in range(3-self.cutoff_stage):
+            self.vision_tower.encoder.stages.pop(-1)
+        del self.vision_tower.layernorm
             
-        if self.update_resolution > 256:
-            self.set_crop_size(self.update_resolution)
-            print(
-                f'Crop size changed to {self.update_resolution}x{self.update_resolution}')
+        self.set_crop_size(self.mm_vision_resolution)
+        print(f'Crop size changed to {self.mm_vision_resolution}x{self.mm_vision_resolution}')
             
-    def forward(self, images):
+    def inner_forward(self, images):
         if type(images) is list:
             image_features = []
             for image in images:
@@ -61,21 +65,30 @@ class ConvNeXtCLIPVisionTower(nn.Module):
                 # Get the image features
                 image_feature = self.vision_tower.encoder(embedding_output,
                                                         output_hidden_states=True,
-                                                        return_dict=True)
-                image_feature = image_feature.hidden_states[-1].permute(0, 2, 3, 1)
-                image_feature = image_feature.reshape(image_features.shape[0], -1, image_features.shape[3]).to(images.dtype)
+                                                        return_dict=True)  # B C H W
+                # image_feature = image_feature.hidden_states[-1].permute(0, 2, 3, 1)
+                # image_feature = image_feature.reshape(image_features.shape[0], -1, image_features.shape[3]).to(images.dtype)
+                image_feature = image_feature.hidden_states[-1].to(images.dtype)
 
                 image_features.append(image_feature)
         else:
             embedding_output = self.vision_tower.embeddings(images)
             image_features = self.vision_tower.encoder(embedding_output,
                                                        output_hidden_states=True,
-                                                       return_dict=True)
-            image_features = image_features.hidden_states[-1].permute(0, 2, 3, 1)
-            image_features = image_features.reshape(image_features.shape[0], -1, image_features.shape[3]).to(images.dtype)
+                                                       return_dict=True)  # B C H W
+            # image_features = image_features.hidden_states[-1].permute(0, 2, 3, 1)
+            # image_features = image_features.reshape(image_features.shape[0], -1, image_features.shape[3]).to(images.dtype)
+            image_features = image_features.hidden_states[-1].to(images.dtype)
 
         return image_features
     
+    def forward(self, images, return_cls_token=False):
+        if self.unfreeze:
+            return self.inner_forward(images)
+        else:
+            with torch.no_grad():
+                return self.inner_forward(images)
+            
     def set_crop_size(self, new_size):
         size_dict = {'height': new_size, 'width': new_size}
         self.image_processor.crop_size = size_dict
@@ -103,13 +116,21 @@ class ConvNeXtCLIPVisionTower(nn.Module):
 
     @property
     def hidden_size(self):
-        return self.config.hidden_size
+        return self.config.hidden_sizes[self.cutoff_stage]
 
+    # @property
+    def image_size(self):
+        return self.mm_vision_resolution
+    
+    # @property
+    def patch_size(self):
+        return self.mm_vision_patch_size
+    
     @property
     def num_patches_per_side(self):
-        return self.config.image_size // self.config.patch_size
+        return self.config.image_size // self.mm_vision_patch_size
 
     @property
     def num_patches(self):
-        return (self.config.image_size // self.config.patch_size) ** 2
+        return (self.config.image_size // self.mm_vision_patch_size) ** 2
 
