@@ -22,7 +22,7 @@ class SimpleConv(nn.Module):
     def __init__(self, conv_depth, mm_hidden_size, hidden_size, patch_size):
         super().__init__()
         modules = [
-            ConvNextLayerNorm(mm_hidden_size, eps=1e-6, data_format="channels_first"), 
+            # ConvNextLayerNorm(mm_hidden_size, eps=1e-6, data_format="channels_first"), 
             nn.Conv2d(mm_hidden_size, hidden_size, kernel_size=patch_size, stride=patch_size)
                    ]
         for _ in range(1, conv_depth):
@@ -30,7 +30,7 @@ class SimpleConv(nn.Module):
             modules.append(nn.Conv2d(hidden_size, hidden_size, kernel_size=1, stride=1))
         self.m = nn.Sequential(*modules)
 
-    # @torch.compile
+    @torch.compile
     def forward(self, x):
         assert x.ndim == 4
         x = self.m(x)

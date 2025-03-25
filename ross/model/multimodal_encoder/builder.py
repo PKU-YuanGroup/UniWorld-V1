@@ -10,7 +10,7 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
         return CLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
     elif 'siglip' in vision_tower.lower():
         return SiglipVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
-    elif 'convnext' in vision_tower.lower():
+    elif 'conv' in vision_tower.lower():
         return ConvNeXtCLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
     
     raise ValueError(f'Unknown vision tower: {vision_tower}')

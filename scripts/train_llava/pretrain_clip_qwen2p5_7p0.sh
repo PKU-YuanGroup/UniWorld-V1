@@ -20,11 +20,10 @@ cd /storage/lb/ross
 conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA/train_json"
 IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
-LLM="/storage/lb/checkpoints/lmsys/vicuna-7b-v1.5"
-VISION_ENCODER="/storage/lb/checkpoints/google/siglip-so400m-patch14-384"
-VISION_DECODER="/storage/lb/checkpoints/pretrained_vae"
-OUTPUT_DIR="/storage/lb/logs/ross/ross-siglip-vicuna-7b-pt558k"
-RUN_NAME="ross-siglip-vicuna-7b-pt558k"
+LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-7B-Instruct"
+VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
+OUTPUT_DIR="/storage/lb/logs/ross/llava-clip-qwen2p5-7b-pt558k-newenv"
+RUN_NAME="llava-clip-qwen2p5-7b-pt558k-newenv"
 
 mkdir -p ${OUTPUT_DIR}
 
@@ -36,21 +35,18 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --gradient_accumulation_steps 2 \
     --learning_rate 1e-3 \
     --warmup_ratio 0.03 \
-    --mm_inv_projector_lr 1e-4 \
     \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path ${LLM} \
     --output_dir ${OUTPUT_DIR} \
     --vision_tower ${VISION_ENCODER} \
     --version plain \
-    --mm_pixel_decoder ${VISION_DECODER} \
     \
     --data_path ${JSON_FOLDER}/llava_image_.json \
     --image_folder ${IMAGE_FOLDER} \
     \
     --mm_projector_type mlp2x_gelu \
     --tune_mm_mlp_adapter True \
-    --mm_inv_projector_type denoiser_vit3x \
     --mm_vision_select_layer -2 \
     --bf16 True \
     --num_train_epochs 1 \

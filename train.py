@@ -84,9 +84,9 @@ class ModelArguments:
     mm_vision_select_feature: Optional[str] = field(default="patch")
 
     # lb's project for convext encoder
-    mm_vision_patch_size: Optional[int] = field(default=16) 
-    mm_vision_resolution: Optional[int] = field(default=384) 
-    mm_train_from_scratch: Optional[bool] = field(default=True)
+    mm_vision_patch_size: Optional[int] = field(default=False) 
+    mm_vision_resolution: Optional[int] = field(default=False) 
+    mm_train_from_scratch: Optional[bool] = field(default=False)
     
 
 
@@ -217,16 +217,16 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
     if getattr(trainer.args, "tune_mm_mlp_adapter", False):
         # Only save Adapter
         keys_to_match = ['mm_projector']
-        if getattr(trainer.args, "use_im_start_end", False):
-            keys_to_match.extend(['embed_tokens', 'embed_in'])
         weight_mm_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
 
         keys_to_match = ['mm_inv_projector']
-        if getattr(trainer.args, "use_im_start_end", False):
-            keys_to_match.extend(['embed_tokens', 'embed_in'])
         weight_mm_inv_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
 
-        trainer.model.config.save_pretrained(output_dir)
+        # keys_to_match = ['vision_tower']
+        # weight_mm_vision_tower = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+        # weight_mm_vision_tower = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_mm_vision_tower.items()}
+        # trainer.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
+        # trainer.model.config.save_pretrained(output_dir)
 
         current_folder = output_dir.split('/')[-1]
         parent_folder = os.path.dirname(output_dir)
@@ -239,9 +239,24 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                 mm_inv_projector_folder = os.path.join(parent_folder, 'mm_inv_projector')
                 os.makedirs(mm_inv_projector_folder, exist_ok=True)
                 torch.save(weight_mm_inv_projector, os.path.join(mm_inv_projector_folder, f'{current_folder}.bin'))
+
+                mm_inv_projector_folder = os.path.join(parent_folder, 'mm_inv_projector')
+                os.makedirs(mm_inv_projector_folder, exist_ok=True)
+                torch.save(weight_mm_inv_projector, os.path.join(mm_inv_projector_folder, f'{current_folder}.bin'))
+
+                # mm_vision_tower_folder = os.path.join(parent_folder, 'vision_tower')
+                # os.makedirs(mm_vision_tower_folder, exist_ok=True)
+                # trainer.model.get_vision_tower().image_processor.save_pretrained(mm_vision_tower_folder)
+                # trainer.model.get_vision_tower().vision_tower.config.save_pretrained(mm_vision_tower_folder)
+                # torch.save(weight_mm_vision_tower, os.path.join(mm_vision_tower_folder, f'{current_folder}.bin'))
             else:
                 torch.save(weight_mm_projector, os.path.join(output_dir, f'mm_projector.bin'))
                 torch.save(weight_mm_inv_projector, os.path.join(output_dir, f'mm_inv_projector.bin'))
+
+                # os.makedirs(os.path.join(output_dir, 'vision_tower'), exist_ok=True)
+                # trainer.model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+                # trainer.model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+                # torch.save(weight_mm_vision_tower, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
         return
 
     if trainer.deepspeed:

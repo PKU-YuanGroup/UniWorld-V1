@@ -74,6 +74,13 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         vision_tower.to(device=device_map, dtype=torch.float16)
     image_processor = vision_tower.image_processor
 
+    new_size = getattr(model.config, 'mm_vision_resolution', False)
+    if new_size:
+        size_dict = {'height': new_size, 'width': new_size}
+        image_processor.crop_size = size_dict
+        image_processor.size = {"shortest_edge": new_size}
+        print(f'Crop size changed to {new_size}x{new_size}')
+
     if hasattr(model.config, "max_sequence_length"):
         context_len = model.config.max_sequence_length
     else:

@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export WANDB_API_KEY="953e958793b218efb850fa194e85843e2c3bd88b"
 # NCCL setting
 export GLOO_SOCKET_IFNAME=bond0
 export NCCL_SOCKET_IFNAME=bond0
@@ -32,8 +32,8 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 32 \
-    --gradient_accumulation_steps 1 \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 2 \
     --learning_rate 1e-3 \
     --warmup_ratio 0.03 \
     --mm_inv_projector_lr 1e-4 \

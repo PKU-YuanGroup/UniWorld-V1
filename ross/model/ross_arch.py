@@ -95,6 +95,8 @@ class RossMetaModel:
         self.config.image_std = self.vision_tower.image_processor.image_std
         self.config.decode_image_size = self.vision_tower.image_size() // self.vision_tower.patch_size() * 16  # 336 -> 384; 384 -> 432
 
+        self.config.mm_vision_resolution = model_args.mm_vision_resolution
+
         ### build CLIP-LLM projector
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type', 'linear')

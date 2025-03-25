@@ -3,6 +3,26 @@ import torch.nn as nn
 
 from transformers import SiglipVisionModel, SiglipImageProcessor, SiglipVisionConfig
 
+from transformers.models.clip import modeling_clip
+
+class CompiledCLIPMLP(modeling_clip.CLIPMLP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+class CompiledLayerNorm(nn.LayerNorm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+modeling_clip.CLIPMLP = CompiledCLIPMLP
+modeling_clip.nn.LayerNorm = CompiledLayerNorm
 
 class SiglipVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
@@ -12,6 +32,7 @@ class SiglipVisionTower(nn.Module):
 
         self.vision_tower_name = vision_tower
         self.select_layer = -2
+        self.mm_train_from_scratch = getattr(args, 'mm_train_from_scratch', False)
         self.unfreeze = getattr(args, 'unfreeze_mm_vision_tower', False)
 
         if not delay_load:
@@ -26,7 +47,14 @@ class SiglipVisionTower(nn.Module):
         
         self.image_processor = SiglipImageProcessor.from_pretrained(self.vision_tower_name)
         self.image_processor.crop_size = self.image_processor.size
-        self.vision_tower = SiglipVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        if self.mm_train_from_scratch:
+            config = SiglipVisionConfig.from_pretrained(self.vision_tower_name)
+            self.vision_tower = SiglipVisionModel._from_config(config)
+        else:
+            self.vision_tower = SiglipVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        assert not ((not self.unfreeze) and self.mm_train_from_scratch)
+        print(f'[debug]\tis train from scratch vision encoder? {self.mm_train_from_scratch}')
+        print(f'[debug]\tis training? {self.unfreeze}')
         self.vision_tower.requires_grad_(self.unfreeze)
 
         self.is_loaded = True

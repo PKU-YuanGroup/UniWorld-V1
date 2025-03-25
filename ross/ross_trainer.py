@@ -23,13 +23,18 @@ def maybe_zero_3(param, ignore_status=False, name=None):
     if hasattr(param, "ds_id"):
         if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if not ignore_status:
-                logger.info(f"{name}, 'no ignore status'")
+                print(f"{name}, 'no ignore status'")
         with zero.GatheredParameters([param]):
             param = param.data.detach().cpu().clone()
     else:
         param = param.detach().cpu().clone()
     return param
 
+
+def get_vision_tower_state_maybe_zero_3(named_params, keys_to_match=['']):
+    to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
+    to_return = {k: maybe_zero_3(v, ignore_status=True).cpu() for k, v in to_return.items()}
+    return to_return
 
 def get_mm_adapter_state_maybe_zero_3(named_params, keys_to_match):
     to_return = {k: t for k, t in named_params if any(key_match in k for key_match in keys_to_match)}
@@ -214,7 +219,7 @@ class RossTrainer(Trainer):
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-            logger.info(f'{self.optimizer}')
+            print(f'{self.optimizer}')
             if optimizer_cls.__name__ == "Adam8bit":
                 import bitsandbytes
 
@@ -224,16 +229,27 @@ class RossTrainer(Trainer):
                 for module in opt_model.modules():
                     if isinstance(module, nn.Embedding):
                         skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
-                        logger.info(f"skipped {module}: {skipped/2**20}M params")
+                        print(f"skipped {module}: {skipped/2**20}M params")
                         manager.register_module_override(module, "weight", {"optim_bits": 32})
                         logger.debug(f"bitsandbytes: will optimize {module} in fp32")
-                logger.info(f"skipped: {skipped/2**20}M params")
+                print(f"skipped: {skipped/2**20}M params")
 
         return self.optimizer
 
     def _save_checkpoint(self, model, trial):
-        if getattr(self.args, 'unfreeze_mm_vision_tower', False):
-            import ipdb;ipdb.set_trace()
+        from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+
+        run_dir = self._get_output_dir(trial=trial)
+        output_dir = os.path.join(run_dir, checkpoint_folder)
+
+        # model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+        # model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+        # weight_to_save = get_vision_tower_state_maybe_zero_3(model.get_vision_tower().vision_tower.named_parameters())
+        # weight_to_save = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_to_save.items()}
+        # torch.save(weight_to_save, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
+
+        # self.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
 
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
@@ -260,20 +276,29 @@ class RossTrainer(Trainer):
                 self.model.config.save_pretrained(output_dir)
                 torch.save(weight_to_save, os.path.join(output_dir, f'mm_inv_projector.bin'))
         else:
-            # self.model.generation_config.do_sample = True
             super(RossTrainer, self)._save_checkpoint(model, trial)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
-        logger.info(f"=> saving to {output_dir}")
+        print(f"=> saving to {output_dir}")
+
+        # self.model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+        # self.model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+        # weight_to_save = get_vision_tower_state_maybe_zero_3(self.model.get_vision_tower().vision_tower.named_parameters())
+        # weight_to_save = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_to_save.items()}
+        # torch.save(weight_to_save, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
+
+        # self.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
+
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
         else:
-            self.model.generation_config.do_sample = True
             super(RossTrainer, self)._save(output_dir, state_dict)
             
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         loss, outputs = super().compute_loss(model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)
-
+        if not math.isfinite(loss.item()):
+            print("Loss is {}, stopping training".format(loss.item()))
+            sys.exit(1)
         if self.state.global_step == 0:
             self.lm_loss = []
         if self.state.global_step == 0:

@@ -2,7 +2,26 @@ import torch
 import torch.nn as nn
 
 from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+from transformers.models.clip import modeling_clip
 
+class CompiledCLIPMLP(modeling_clip.CLIPMLP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+class CompiledLayerNorm(nn.LayerNorm):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @torch.compile
+    def forward(self, *args, **kwargs):
+        return super().forward(*args, **kwargs)
+    
+modeling_clip.CLIPMLP = CompiledCLIPMLP
+modeling_clip.nn.LayerNorm = CompiledLayerNorm
 
 class CLIPVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
@@ -13,6 +32,7 @@ class CLIPVisionTower(nn.Module):
         self.vision_tower_name = vision_tower
         self.select_layer = args.mm_vision_select_layer
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
+        self.mm_train_from_scratch = getattr(args, 'mm_train_from_scratch', False)
         self.unfreeze = getattr(args, 'unfreeze_mm_vision_tower', False)
 
         if not delay_load:
@@ -25,8 +45,15 @@ class CLIPVisionTower(nn.Module):
             print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
 
-        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
-        self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)       
+        if self.mm_train_from_scratch:
+            config = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
+            self.vision_tower = CLIPVisionModel._from_config(config)
+        else:
+            self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        print(f'[debug]\tis train from scratch vision encoder? {self.mm_train_from_scratch}')
+        print(f'[debug]\tis training? {self.unfreeze}')
+        assert not ((not self.unfreeze) and self.mm_train_from_scratch)
         self.vision_tower.requires_grad_(self.unfreeze)
         print(f"[debug]\tself.vision_tower.requires_grad="
               f"{self.vision_tower.vision_model.embeddings.patch_embedding.weight.requires_grad}")

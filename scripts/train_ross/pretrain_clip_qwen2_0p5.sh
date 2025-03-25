@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export WANDB_API_KEY="953e958793b218efb850fa194e85843e2c3bd88b"
 # NCCL setting
 export GLOO_SOCKET_IFNAME=bond0
 export NCCL_SOCKET_IFNAME=bond0
@@ -23,8 +23,8 @@ IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2-0.5B-Instruct"
 VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
 VISION_DECODER="/storage/lb/checkpoints/pretrained_vae"
-OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-newenv"
-RUN_NAME="ross-clip-qwen2-0p5b-pt558k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-newenv-test"
+RUN_NAME="ross-clip-qwen2-0p5b-pt558k-newenv-test"
 
 mkdir -p ${OUTPUT_DIR}
 

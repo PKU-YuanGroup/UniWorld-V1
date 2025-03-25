@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export WANDB_API_KEY="953e958793b218efb850fa194e85843e2c3bd88b"
 # NCCL setting
 export GLOO_SOCKET_IFNAME=bond0
 export NCCL_SOCKET_IFNAME=bond0
@@ -23,23 +23,26 @@ IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2-0.5B-Instruct"
 VISION_ENCODER="/storage/lb/checkpoints/ConvLLaVA/LAION-CLIP-ConvNeXt-Large-512"
 VISION_DECODER="/storage/lb/checkpoints/pretrained_vae"
-OUTPUT_DIR="/storage/lb/logs/ross/ross-conv-qwen2-0p5b-pt558k-newenv"
-RUN_NAME="ross-conv-qwen2-0p5b-pt558k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/ross-conv-qwen2-0p5b-pt558k-newenv-vp16-projp1"
+RUN_NAME="ross-conv-qwen2-0p5b-pt558k-newenv-vp16-projp1"
 
 VISION_PATCH_SIZE=16
 PROJ_PATCH_SIZE=1
-TRAIN_FROM_SCRATCH=True
-UNFREEZE=True
+TRAIN_FROM_SCRATCH=False
+UNFREEZE=False
 VISION_LR=1e-3
+PROJ_LR=1e-3
+LR_SCHEDULER="cosine"
+
 mkdir -p ${OUTPUT_DIR}
 
-torchrun --nproc-per-node=1 --nnodes 1 --node_rank 0 \
+torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 4 \
+    --per_device_train_batch_size 32 \
     --gradient_accumulation_steps 1 \
-    --learning_rate 1e-3 \
+    --learning_rate ${PROJ_LR} \
     --warmup_ratio 0.03 \
     \
     --deepspeed ./scripts/zero2.json \
@@ -66,15 +69,15 @@ torchrun --nproc-per-node=1 --nnodes 1 --node_rank 0 \
     --per_device_eval_batch_size 4 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 2 \
+    --save_steps 24000 \
     --save_total_limit 1 \
     --weight_decay 0. \
-    --lr_scheduler_type "cosine" \
+    --lr_scheduler_type ${LR_SCHEDULER} \
     --logging_steps 1 \
     --tf32 True \
     --model_max_length 4096 \
     --gradient_checkpointing True \
-    --dataloader_num_workers 0 \
+    --dataloader_num_workers 16 \
     --lazy_preprocess True \
     --report_to wandb \
     --run_name ${RUN_NAME} >> ${OUTPUT_DIR}/log.txt

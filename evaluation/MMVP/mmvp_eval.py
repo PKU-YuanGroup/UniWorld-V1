@@ -60,7 +60,7 @@ def process(line, args, tokenizer, image_processor, model_config, images):
     else:
         image = input_image
         image_size = [image.size]
-        image_tensor = process_images([image], image_processor, model_config)
+        image_tensor = process_images([image], image_processor, model_config).cuda()
 
     input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
 
@@ -96,7 +96,8 @@ def eval_model(args):
         images[i] = Image.open(file_path).convert('RGB')
 
     questions = []
-    file_path = hf_hub_download(repo_id="MMVP/MMVP", filename="Questions.csv", repo_type="dataset")
+    # file_path = hf_hub_download(repo_id="MMVP/MMVP", filename="Questions.csv", repo_type="dataset")
+    file_path = "/storage/lb/logs/ross/mmvp_cache/hub/datasets--MMVP--MMVP/snapshots/37eafecab8a3940c50c2ade5b36de69dbc99a8cf/Questions.csv"
     with open(file_path, 'r') as file:
         reader = csv.reader(file)
         for row in reader:

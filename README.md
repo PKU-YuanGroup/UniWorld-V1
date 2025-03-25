@@ -106,14 +106,14 @@ The data of benchmarks will be downloaded automatically.
 conda activate ross_env
 cd /storage/lb/ross/evaluation/VLMEvalKit
 
-MODEL_PATH="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k-chatml-newenv-fa"
+MODEL_PATH="/storage/lb/logs/ross/llava-conv-qwen2-0p5b-pt558k-sft737k-newenv-p32"
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=8 run.py \
     --data POPE HallusionBench MMBench_DEV_EN MMBench_DEV_CN SEEDBench_IMG MMMU_DEV_VAL AI2D_TEST OCRBench RealWorldQA \
     --model ${MODEL_PATH} \
     --judge exact_matching \
     --work-dir ${MODEL_PATH}/eval/VLMEvalKit
 
-MODEL_PATH="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k-chatml-newenv-fa"
+MODEL_PATH="/storage/lb/logs/ross/llava-conv-qwen2-0p5b-pt558k-sft737k-newenv-p32"
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=8 run.py \
     --data ChartQA_TEST DocVQA_VAL InfoVQA_VAL TextVQA_VAL GQA_TestDev_Balanced \
     --model ${MODEL_PATH} \
@@ -127,7 +127,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per
 ```
 conda activate ross_env
 cd /storage/lb/ross
-vlmevalkit="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k-chatml-newenv-fa/eval/VLMEvalKit/T20250323_G8d5ba4ee"
+vlmevalkit="/storage/lb/logs/ross/llava-conv-qwen2-0p5b-pt558k-sft737k-newenv-p32/eval/VLMEvalKit/T20250325_G"
 python tools/print_results.py --vlmevalkit_root ${vlmevalkit} 
 ```
 
@@ -154,7 +154,7 @@ conda activate ross_env
 cd /storage/lb/ross/evaluation/MMVP
 
 HF_HOME="/storage/lb/logs/ross/mmvp_cache"
-MODEL_PATH="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k-chatml-newenv-fa"
+MODEL_PATH="/storage/lb/logs/ross/llava-conv-qwen2-0p5b-pt558k-sft737k-newenv-768"
 CONV_MODE="qwen_chatml"
 HF_HOME=${HF_HOME} CUDA_VISIBLE_DEVICES=0 python mmvp_eval.py \
     --model_path ${MODEL_PATH} \

@@ -1,5 +1,5 @@
 #!/bin/bash
-
+export WANDB_API_KEY="953e958793b218efb850fa194e85843e2c3bd88b"
 # NCCL setting
 export GLOO_SOCKET_IFNAME=bond0
 export NCCL_SOCKET_IFNAME=bond0
