@@ -176,6 +176,10 @@ class RossTrainer(Trainer):
                 lr_mapper["vision_tower"] = self.args.mm_vision_tower_lr
             if self.args.mm_inv_projector_lr is not None:
                 lr_mapper["mm_inv_projector"] = self.args.mm_inv_projector_lr
+            if self.args.mm_eye_projector_lr is not None:
+                lr_mapper["mm_eye_projector"] = self.args.mm_eye_projector_lr
+            if self.args.mm_mask_projector_lr is not None:
+                lr_mapper["mm_mask_projector"] = self.args.mm_mask_projector_lr
             if len(lr_mapper) > 0:
                 special_lr_parameters = [name for name, _ in opt_model.named_parameters() if any(module_keyword in name for module_keyword in lr_mapper)]
                 optimizer_grouped_parameters = [
@@ -188,6 +192,14 @@ class RossTrainer(Trainer):
                         "weight_decay": 0.0,
                     },
                 ]
+                if self.args.local_rank == 0 or self.args.local_rank == -1:
+                    nospecial_lr_decay = [n for n, p in opt_model.named_parameters() if (n in decay_parameters and n not in special_lr_parameters and p.requires_grad)]
+                    for n in nospecial_lr_decay:
+                        print(f'{n:<110}, decay: {self.args.weight_decay}, default lr')
+                    nospecial_lr_nodecay = [n for n, p in opt_model.named_parameters() if (n not in decay_parameters and n not in special_lr_parameters and p.requires_grad)]
+                    for n in nospecial_lr_nodecay:
+                        print(f'{n:<110}, decay: 0.0, default lr')
+
                 for module_keyword, lr in lr_mapper.items():
                     module_parameters = [name for name, _ in opt_model.named_parameters() if module_keyword in name]
                     optimizer_grouped_parameters.extend(
@@ -204,6 +216,13 @@ class RossTrainer(Trainer):
                             },
                         ]
                     )
+                    if self.args.local_rank == 0 or self.args.local_rank == -1:
+                        special_lr_decay = [n for n, p in opt_model.named_parameters() if (n in decay_parameters and n in module_parameters and p.requires_grad)]
+                        for n in special_lr_decay:
+                            print(f'{n:<110}, decay: {self.args.weight_decay}, lr: {lr}')
+                        special_lr_nodecay = [n for n, p in opt_model.named_parameters() if (n not in decay_parameters and n in module_parameters and p.requires_grad)]
+                        for n in special_lr_nodecay:
+                            print(f'{n:<110}, decay: 0.0, lr: {lr}')
             else:
                 optimizer_grouped_parameters = [
                     {
@@ -217,9 +236,9 @@ class RossTrainer(Trainer):
                 ]
 
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
-
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-            print(f'{self.optimizer}')
+            if self.args.local_rank == 0 or self.args.local_rank == -1:
+                print(f'{self.optimizer}')
             if optimizer_cls.__name__ == "Adam8bit":
                 import bitsandbytes
 
@@ -229,10 +248,12 @@ class RossTrainer(Trainer):
                 for module in opt_model.modules():
                     if isinstance(module, nn.Embedding):
                         skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
-                        print(f"skipped {module}: {skipped/2**20}M params")
+                        if self.args.local_rank == 0 or self.args.local_rank == -1:
+                            print(f"skipped {module}: {skipped/2**20}M params")
                         manager.register_module_override(module, "weight", {"optim_bits": 32})
                         logger.debug(f"bitsandbytes: will optimize {module} in fp32")
-                print(f"skipped: {skipped/2**20}M params")
+                if self.args.local_rank == 0 or self.args.local_rank == -1:
+                    print(f"skipped: {skipped/2**20}M params")
 
         return self.optimizer
 
@@ -243,13 +264,14 @@ class RossTrainer(Trainer):
         run_dir = self._get_output_dir(trial=trial)
         output_dir = os.path.join(run_dir, checkpoint_folder)
 
-        # model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
-        # model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
-        # weight_to_save = get_vision_tower_state_maybe_zero_3(model.get_vision_tower().vision_tower.named_parameters())
-        # weight_to_save = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_to_save.items()}
-        # torch.save(weight_to_save, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
+        if self.args.unfreeze_mm_vision_tower and self.args.mm_vision_tower_lr > 0.0:
+            model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+            model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+            weight_to_save = get_vision_tower_state_maybe_zero_3(model.get_vision_tower().vision_tower.named_parameters())
+            weight_to_save = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_to_save.items()}
+            torch.save(weight_to_save, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
 
-        # self.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
+            self.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
 
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
@@ -260,8 +282,6 @@ class RossTrainer(Trainer):
 
             # Only save Adapter
             keys_to_match = ['mm_projector']
-            if getattr(self.args, "use_im_start_end", False):
-                keys_to_match.extend(['embed_tokens', 'embed_in'])
             weight_to_save = get_mm_adapter_state_maybe_zero_3(self.model.named_parameters(), keys_to_match)
             if self.args.local_rank == 0 or self.args.local_rank == -1:
                 self.model.config.save_pretrained(output_dir)
@@ -269,29 +289,46 @@ class RossTrainer(Trainer):
 
             # Only save Inv adapter
             keys_to_match = ['mm_inv_projector']
-            if getattr(self.args, "use_im_start_end", False):
-                keys_to_match.extend(['embed_tokens', 'embed_in'])
             weight_to_save = get_mm_adapter_state_maybe_zero_3(self.model.named_parameters(), keys_to_match)
             if self.args.local_rank == 0 or self.args.local_rank == -1:
                 self.model.config.save_pretrained(output_dir)
                 torch.save(weight_to_save, os.path.join(output_dir, f'mm_inv_projector.bin'))
+
+            # Only save eye adapter
+            keys_to_match = ['mm_eye_projector']
+            weight_to_save = get_mm_adapter_state_maybe_zero_3(self.model.named_parameters(), keys_to_match)
+            if self.args.local_rank == 0 or self.args.local_rank == -1:
+                self.model.config.save_pretrained(output_dir)
+                torch.save(weight_to_save, os.path.join(output_dir, f'mm_eye_projector.bin'))
+
+            # Only save mask adapter
+            keys_to_match = ['mm_mask_projector']
+            weight_to_save = get_mm_adapter_state_maybe_zero_3(self.model.named_parameters(), keys_to_match)
+            if self.args.local_rank == 0 or self.args.local_rank == -1:
+                self.model.config.save_pretrained(output_dir)
+                torch.save(weight_to_save, os.path.join(output_dir, f'mm_mask_projector.bin'))
         else:
+            self.model.generation_config.do_sample = True
             super(RossTrainer, self)._save_checkpoint(model, trial)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
-        print(f"=> saving to {output_dir}")
+        if self.args.local_rank == 0 or self.args.local_rank == -1:
+            print(f"=> saving to {output_dir}")
 
-        # self.model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
-        # self.model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
-        # weight_to_save = get_vision_tower_state_maybe_zero_3(self.model.get_vision_tower().vision_tower.named_parameters())
-        # weight_to_save = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_to_save.items()}
-        # torch.save(weight_to_save, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
+        
+        if self.args.unfreeze_mm_vision_tower and self.args.mm_vision_tower_lr > 0.0:
+            self.model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+            self.model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+            weight_to_save = get_vision_tower_state_maybe_zero_3(self.model.get_vision_tower().vision_tower.named_parameters())
+            weight_to_save = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_to_save.items()}
+            torch.save(weight_to_save, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
 
-        # self.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
+            self.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
 
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
         else:
+            self.model.generation_config.do_sample = True
             super(RossTrainer, self)._save(output_dir, state_dict)
             
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -303,14 +340,24 @@ class RossTrainer(Trainer):
             self.lm_loss = []
         if self.state.global_step == 0:
             self.vm_loss = []
+        if self.state.global_step == 0:
+            self.eye_loss = []
+        if self.state.global_step == 0:
+            self.mask_loss = []
 
         # if self.state.global_step % (self.args.logging_steps * self.args.gradient_accumulation_steps) == 0:
         lm_loss = getattr(outputs, 'lm_loss', False)
         vm_loss = getattr(outputs, 'vm_loss', False)
+        eye_loss = getattr(outputs, 'eye_loss', False)
+        mask_loss = getattr(outputs, 'mask_loss', False)
         if lm_loss:
             self.lm_loss.append(lm_loss)
         if vm_loss:
             self.vm_loss.append(vm_loss)
+        if eye_loss:
+            self.eye_loss.append(eye_loss)
+        if mask_loss:
+            self.mask_loss.append(mask_loss)
 
         return (loss, outputs) if return_outputs else loss
     
@@ -321,4 +368,10 @@ class RossTrainer(Trainer):
         if getattr(self, 'vm_loss', False) and len(self.vm_loss) > 0:
             logs["vm_loss"] = round(torch.stack(self.vm_loss).detach().mean().item(), 4)
             self.vm_loss = []
+        if getattr(self, 'eye_loss', False) and len(self.eye_loss) > 0:
+            logs["eye_loss"] = round(torch.stack(self.eye_loss).detach().mean().item(), 4)
+            self.eye_loss = []
+        if getattr(self, 'mask_loss', False) and len(self.mask_loss) > 0:
+            logs["mask_loss"] = round(torch.stack(self.mask_loss).detach().mean().item(), 4)
+            self.mask_loss = []
         super().log(logs, *args, **kwargs)

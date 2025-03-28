@@ -16,7 +16,8 @@ class ConvNeXtCLIPVisionTower(nn.Module):
         self.mm_vision_patch_size = getattr(args, 'mm_vision_patch_size', False)
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
         self.unfreeze = getattr(args, 'unfreeze_mm_vision_tower', False)
-        print('args', args)
+
+        self.mm_mask_ratio = getattr(args, 'mm_mask_ratio', 0.0)
         if not delay_load:
             self.load_model()
         else:
@@ -31,10 +32,11 @@ class ConvNeXtCLIPVisionTower(nn.Module):
         if self.mm_train_from_scratch:
             config = ConvNextConfig.from_pretrained(self.vision_tower_name)
             self.vision_tower = ConvNextModel._from_config(config)
+            print(f'[debug]\ttrain from scratch vision encoder')
         else:
             self.vision_tower = ConvNextModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+            print(f'[debug]\tload pretrained weight from {self.vision_tower_name}')
         assert not ((not self.unfreeze) and self.mm_train_from_scratch)
-        print(f'[debug]\tis train from scratch vision encoder? {self.mm_train_from_scratch}')
         print(f'[debug]\tis training? {self.unfreeze}')
         self.vision_tower.requires_grad_(self.unfreeze)
         print(f"[debug]\tself.vision_tower.requires_grad="
@@ -92,15 +94,17 @@ class ConvNeXtCLIPVisionTower(nn.Module):
             # image_features = image_features.hidden_states[-1].permute(0, 2, 3, 1)
             # image_features = image_features.reshape(image_features.shape[0], -1, image_features.shape[3]).to(images.dtype)
             image_features = image_features.hidden_states[-1].to(images.dtype)
-        return image_features
-    
+        return {'image_features': image_features}
+
     @torch.compile
     def forward(self, images, return_cls_token=False):
         if self.unfreeze:
-            return self.inner_forward(images)
+            encoder_output = self.inner_forward(images) if self.mm_mask_ratio == 0.0 else self.mask_inner_forward(images)
+            return encoder_output
         else:
             with torch.no_grad():
-                return self.inner_forward(images)
+                encoder_output = self.inner_forward(images) if self.mm_mask_ratio == 0.0 else self.mask_inner_forward(images)
+                return encoder_output
             
     def set_crop_size(self, new_size):
         size_dict = {'height': new_size, 'width': new_size}

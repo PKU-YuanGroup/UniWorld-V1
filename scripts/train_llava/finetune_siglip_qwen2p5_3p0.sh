@@ -20,11 +20,11 @@ cd /storage/lb/ross
 conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
-LLM="/storage/lb/checkpoints/lmsys/vicuna-7b-v1.5"
-VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
-PRETRAIN_DIR="/storage/lb/logs/ross/llava-clip-vicuna-7b-pt558k-newenv"
-OUTPUT_DIR="/storage/lb/logs/ross/llava-clip-vicuna-7b-pt558k-sft737k-newenv"
-RUN_NAME="llava-clip-vicuna-7b-pt558k-sft737k-newenv"
+LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-3B-Instruct"
+VISION_ENCODER="/storage/lb/checkpoints/google/siglip-so400m-patch14-384"
+PRETRAIN_DIR="/storage/lb/logs/ross/llava-siglip-qwen2p5-3p0b-pt558k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/llava-siglip-qwen2p5-3p0b-pt558k-sft737k-newenv"
+RUN_NAME="llava-siglip-qwen2p5-3p0b-pt558k-sft737k-newenv"
 
 mkdir -p ${OUTPUT_DIR}
 
@@ -42,7 +42,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --pretrain_mm_mlp_adapter ${PRETRAIN_DIR}/mm_projector.bin \
     --output_dir ${OUTPUT_DIR} \
     --vision_tower ${VISION_ENCODER} \
-    --version v1 \
+    --version qwen_chatml \
     \
     --data_path ${JSON_FOLDER}/Cambrian737k.json \
     --image_folder ${IMAGE_FOLDER} \

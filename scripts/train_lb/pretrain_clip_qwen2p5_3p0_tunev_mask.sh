@@ -18,47 +18,52 @@ export TOKENIZERS_PARALLELISM=false
 
 cd /storage/lb/ross
 conda activate ross_env
-JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
-IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
-LLM="/storage/lb/checkpoints/lmsys/vicuna-7b-v1.5"
+JSON_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA/train_json"
+IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
+LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-3B-Instruct"
 VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
-PRETRAIN_DIR="/storage/lb/logs/ross/llava-clip-vicuna-7b-pt558k-newenv"
-OUTPUT_DIR="/storage/lb/logs/ross/llava-clip-vicuna-7b-pt558k-sft737k-newenv"
-RUN_NAME="llava-clip-vicuna-7b-pt558k-sft737k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/llava-clip-qwen2p5-3p0b-pt558k-newenv-tunev-mask"
+RUN_NAME="llava-clip-qwen2p5-3p0b-pt558k-newenv-tunev-mask"
 
 mkdir -p ${OUTPUT_DIR}
 
-torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
+torchrun --nproc-per-node=1 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 4 \
-    --learning_rate 2e-5 \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 2 \
+    --learning_rate 1e-3 \
     --warmup_ratio 0.03 \
+    \
+    --mm_mask_ratio 0.5 \
+    --mm_mask_adapter True \
+    --mm_mask_depth 4 \
+    --mm_mask_weight 1.0 \
+    --mm_mask_projector_lr 1e-3 \
+    \
+    --unfreeze_mm_vision_tower True \
+    --mm_vision_tower_lr 1e-3 \
     \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path ${LLM} \
-    --pretrain_mm_mlp_adapter ${PRETRAIN_DIR}/mm_projector.bin \
     --output_dir ${OUTPUT_DIR} \
     --vision_tower ${VISION_ENCODER} \
-    --version v1 \
+    --version plain \
     \
-    --data_path ${JSON_FOLDER}/Cambrian737k.json \
+    --data_path ${JSON_FOLDER}/llava_image_.json \
     --image_folder ${IMAGE_FOLDER} \
     \
     --mm_projector_type mlp2x_gelu \
+    --tune_mm_mlp_adapter True \
     --mm_vision_select_layer -2 \
-    --image_aspect_ratio pad \
-    --group_by_modality_length True \
     --bf16 True \
     --num_train_epochs 1 \
     --per_device_eval_batch_size 4 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 24000 \
+    --save_steps 2 \
     --save_total_limit 1 \
-    --save_only_model \
     --weight_decay 0. \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \

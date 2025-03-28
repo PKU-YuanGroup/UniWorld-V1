@@ -35,7 +35,6 @@ model_inputs = tokenizer([prompt], return_tensors="pt").to(model.device)
 outputs = model(**model_inputs, output_hidden_states=True)
 logits_per_layer = outputs.hidden_states[1:]
 print(len(logits_per_layer), logits_per_layer[0].shape)
-# import ipdb;ipdb.set_trace()
 num_layers = len(logits_per_layer)
 similarity_matrix = torch.zeros(num_layers, num_layers)
 

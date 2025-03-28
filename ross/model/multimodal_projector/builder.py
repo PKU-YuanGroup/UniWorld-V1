@@ -112,3 +112,51 @@ def build_inv_projector(config, delay_load=False, **kwargs):
         return IdentityMap()
 
     raise ValueError(f'Unknown projector type: {projector_type}')
+
+
+
+def build_eye_projector(config, delay_load=False, **kwargs):
+    projector_type = getattr(config, 'mm_eye_projector_type', 'linear')
+    from transformers import AutoModelForCausalLM
+    model = AutoModelForCausalLM.from_pretrained(config.mm_eye_model_path)
+    mm_eye_hidden_size = model.config.hidden_size
+    if projector_type.endswith("_norm"):
+        model = [model.model.norm, model.lm_head] 
+        projector_type = projector_type.replace('_norm', '')
+    else:
+        model = [model.lm_head]
+
+    if projector_type == 'linear':
+        return nn.Sequential(nn.Linear(config.hidden_size, mm_eye_hidden_size), *model)
+
+    if projector_type.startswith("mlp"):
+        mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)
+        if mlp_gelu_match:
+            mlp_depth = int(mlp_gelu_match.group(1))
+            modules = [nn.Linear(config.hidden_size, mm_eye_hidden_size)]
+            for _ in range(1, mlp_depth):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(mm_eye_hidden_size, mm_eye_hidden_size))
+            return nn.Sequential(*modules, *model)
+        
+    if projector_type == 'identity':
+        return IdentityMap()
+
+    raise ValueError(f'Unknown projector type: {projector_type}')
+
+
+
+def build_mask_projector(config, delay_load=False, **kwargs):
+    projector_type = getattr(config, 'mm_mask_projector_type', 'mask')
+
+    if projector_type.startswith("mask"):
+        from ross.model.multimodal_decoder.mask_decoder_vit import MaskedAutoencoderViT
+        return MaskedAutoencoderViT(
+            in_chans=3,
+            embed_dim=config.hidden_size,
+            patch_size=config.mm_patch_size,
+            n_patches=config.image_embed_len,
+        )
+    
+
+    raise ValueError(f'Unknown projector type: {projector_type}')

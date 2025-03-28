@@ -21,10 +21,10 @@ conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
 LLM="/storage/lb/checkpoints/lmsys/vicuna-7b-v1.5"
-VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
-PRETRAIN_DIR="/storage/lb/logs/ross/llava-clip-vicuna-7b-pt558k-newenv"
-OUTPUT_DIR="/storage/lb/logs/ross/llava-clip-vicuna-7b-pt558k-sft737k-newenv"
-RUN_NAME="llava-clip-vicuna-7b-pt558k-sft737k-newenv"
+VISION_ENCODER="/storage/lb/checkpoints/google/siglip-so400m-patch14-384"
+PRETRAIN_DIR="/storage/lb/logs/ross/llava-siglip-vicuna-7b-pt558k-newenv"
+OUTPUT_DIR="/storage/lb/logs/ross/llava-siglip-vicuna-7b-pt558k-sft737k-newenv"
+RUN_NAME="llava-siglip-vicuna-7b-pt558k-sft737k-newenv"
 
 mkdir -p ${OUTPUT_DIR}
 

@@ -27,7 +27,7 @@ from transformers.modeling_outputs import ModelOutput
 from einops import rearrange
 
 from .multimodal_encoder.builder import build_vision_tower
-from .multimodal_projector.builder import build_vision_projector, build_inv_projector
+from .multimodal_projector.builder import build_vision_projector, build_inv_projector, build_eye_projector, build_mask_projector
 from .pixel_decoder.builder import build_pixel_decoder
 
 from ross.constants import (
@@ -68,12 +68,22 @@ class RossMetaModel:
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
         mm_patch_merge_type = model_args.mm_patch_merge_type
 
+        self.config.mm_vision_tower = vision_tower
+
         # for pixel_decoder
         mm_pixel_decoder = model_args.mm_pixel_decoder
         pretrain_mm_inv_mlp_adapter = model_args.pretrain_mm_inv_mlp_adapter
-
-        self.config.mm_vision_tower = vision_tower
         self.config.mm_pixel_decoder = mm_pixel_decoder
+
+        # for pretrain_eye_adapter
+        mm_eye_adapter = model_args.mm_eye_adapter
+        pretrain_mm_eye_mlp_adapter = model_args.pretrain_mm_eye_mlp_adapter
+        self.config.mm_eye_adapter = mm_eye_adapter
+
+        # for pretrain_mask_adapter
+        mm_mask_adapter = model_args.mm_mask_adapter
+        pretrain_mm_mask_mlp_adapter = model_args.pretrain_mm_mask_mlp_adapter
+        self.config.mm_mask_adapter = mm_mask_adapter
 
         if self.get_vision_tower() is None:
             vision_tower = build_vision_tower(model_args)
@@ -94,8 +104,22 @@ class RossMetaModel:
         self.config.image_mean = self.vision_tower.image_processor.image_mean
         self.config.image_std = self.vision_tower.image_processor.image_std
         self.config.decode_image_size = self.vision_tower.image_size() // self.vision_tower.patch_size() * 16  # 336 -> 384; 384 -> 432
+        self.config.mm_patch_size = self.vision_tower.patch_size()
 
+        # for convnext
         self.config.mm_vision_resolution = model_args.mm_vision_resolution
+
+        ## build eye projector
+        self.config.mm_eye_model_path = model_args.mm_eye_model_path
+        self.config.mm_eye_depth = model_args.mm_eye_depth
+        self.config.mm_eye_weight = model_args.mm_eye_weight
+
+        ## build mask projector
+        self.config.mm_mask_ratio = model_args.mm_mask_ratio
+        self.config.mm_mask_depth = model_args.mm_mask_depth
+        self.config.mm_mask_weight = model_args.mm_mask_weight
+        if mm_mask_adapter:
+            self.image_embed_len = int(self.image_embed_len * model_args.mm_mask_ratio)
 
         ### build CLIP-LLM projector
         self.config.use_mm_proj = True
@@ -126,6 +150,49 @@ class RossMetaModel:
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+
+
+        self.config.eye_enable = False
+        if getattr(model_args, 'mm_eye_adapter', False):
+            self.config.eye_enable = True
+            self.config.use_mm_eye_proj = True
+            self.config.mm_eye_projector_type = getattr(model_args, 'mm_eye_projector_type', 'linear')
+            if getattr(self, 'mm_eye_projector', None) is None:
+                self.mm_eye_projector = build_eye_projector(self.config)
+            else:
+                # In case it is frozen by LoRA
+                for p in self.mm_eye_projector.parameters():
+                    p.requires_grad = True
+
+            if pretrain_mm_eye_mlp_adapter is not None:
+                print(f"=> loading pretrain_mm_eye_mlp_adapter from {pretrain_mm_eye_mlp_adapter} ...")
+                mm_eye_projector_weights = torch.load(pretrain_mm_eye_mlp_adapter, map_location='cpu')
+
+                def get_w(weights, keyword):
+                    return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+
+                self.mm_eye_projector.load_state_dict(get_w(mm_eye_projector_weights, 'mm_eye_projector'))
+
+        self.config.mask_enable = False
+        if getattr(model_args, 'mm_mask_adapter', False):
+            self.config.mask_enable = True
+            self.config.use_mm_mask_proj = True
+            self.config.mm_mask_projector_type = getattr(model_args, 'mm_mask_projector_type', 'linear')
+            if getattr(self, 'mm_mask_projector', None) is None:
+                self.mm_mask_projector = build_mask_projector(self.config)
+            else:
+                # In case it is frozen by LoRA
+                for p in self.mm_mask_projector.parameters():
+                    p.requires_grad = True
+
+            if pretrain_mm_mask_mlp_adapter is not None:
+                print(f"=> loading pretrain_mm_mask_mlp_adapter from {pretrain_mm_mask_mlp_adapter} ...")
+                mm_mask_projector_weights = torch.load(pretrain_mm_mask_mlp_adapter, map_location='cpu')
+
+                def get_w(weights, keyword):
+                    return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+
+                self.mm_mask_projector.load_state_dict(get_w(mm_mask_projector_weights, 'mm_mask_projector'))
 
         self.config.ross_enable = False
         if getattr(model_args, 'mm_pixel_decoder', False):
@@ -211,9 +278,10 @@ class RossMetaForCausalLM(ABC):
         return self.get_model().get_vision_tower()
 
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images, return_cls_token=False)
+        encoder_out = self.get_model().get_vision_tower()(images, return_cls_token=False)
+        image_features = encoder_out.pop('image_features')
         image_features = self.get_model().mm_projector(image_features)
-        return image_features
+        return image_features, encoder_out
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
@@ -221,13 +289,13 @@ class RossMetaForCausalLM(ABC):
     ):
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None:
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, cache_position
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, cache_position, None
 
         if type(images) is list or images.ndim == 5:
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
+            image_features, encoder_out = self.encode_images(concat_images)
             split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
             mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
@@ -275,7 +343,7 @@ class RossMetaForCausalLM(ABC):
             else:
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
-            image_features = self.encode_images(images)
+            image_features, encoder_out = self.encode_images(images)
 
         # Let's just add dummy tensors if they do not exist,
         # it is a headache to deal with None all the time.
@@ -415,7 +483,7 @@ class RossMetaForCausalLM(ABC):
         cache_position = None if (_attention_mask is None or cache_position is None) else torch.arange(
             attention_mask.shape[1], device=attention_mask.device)
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, boi_ids, eoi_ids, cache_position
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, boi_ids, eoi_ids, cache_position, encoder_out
 
     def compute_vm_loss(
         self,
@@ -464,12 +532,70 @@ class RossMetaForCausalLM(ABC):
         vm_loss_mask = vm_loss_mask.repeat(4)
         vm_loss = (vm_loss.view(batch_size, -1).mean() * vm_loss_mask).sum() / (vm_loss_mask.sum() + eps)
         return vm_loss
+    
+    def compute_eye_loss(
+        self,
+        hidden_states: torch.Tensor,
+        labels: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ):
+        if isinstance(self.config.mm_eye_depth, float):
+            mm_eye_depth = int((len(hidden_states) - 1) * self.config.mm_eye_depth)
+        else:
+            mm_eye_depth = self.config.mm_eye_depth
+        hidden_state = hidden_states[mm_eye_depth]
+        logits = self.model.mm_eye_projector(hidden_state)
 
+        eye_loss = self.model.loss_function(logits=logits, labels=labels, vocab_size=logits.shape[-1], **kwargs)
+        return eye_loss
+    
+    def compute_mask_loss(
+        self,
+        images: torch.Tensor,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor,
+        ids_restore: torch.Tensor,
+        boi_ids: torch.Tensor,
+        eoi_ids: torch.Tensor,
+        **kwargs,
+    ):
+        if isinstance(self.config.mm_mask_depth, float):
+            mm_mask_depth = int((len(hidden_states) - 1) * self.config.mm_mask_depth)
+        else:
+            mm_mask_depth = self.config.mm_mask_depth
+        hidden_states = hidden_states[mm_mask_depth]
+
+        batch_size = hidden_states.shape[0]
+        mask_loss_mask = torch.zeros((batch_size,), device=hidden_states.device).bool()
+        image_hidden_states = torch.zeros((batch_size, self.model.image_embed_len, hidden_states.shape[-1]),
+                                          dtype=hidden_states.dtype,
+                                          device=hidden_states.device)
+
+        for batch_index, (cur_boi_id, cur_eoi_id, cur_hidden_state) in enumerate(zip(boi_ids, eoi_ids, hidden_states)):
+            if (cur_boi_id is not None) and (cur_eoi_id is not None):
+                assert cur_eoi_id - cur_boi_id + 1 == self.model.image_embed_len
+                assert cur_hidden_state.shape[0] >= cur_eoi_id
+                image_hidden_states[batch_index] = cur_hidden_state[cur_boi_id: cur_eoi_id + 1]
+                mask_loss_mask[batch_index] = True
+
+        pred = self.model.mm_mask_projector(image_hidden_states, ids_restore)  # [N, L, p*p*3]
+        target = self.model.mm_mask_projector.patchify(images)
+        mean = target.mean(dim=-1, keepdim=True)
+        var = target.var(dim=-1, keepdim=True)
+        target = (target - mean) / (var + 1.e-6)**.5
+
+        mask_loss = (pred - target) ** 2
+        mask_loss = mask_loss.mean(dim=-1)  # [N, L], mean loss per patch
+        mask = mask * mask_loss_mask[:, None]
+        mask_loss = (mask_loss * mask).sum() / mask.sum()  # mean loss on removed patches
+        return mask_loss
 
 @dataclass
 class CausalLMOutputWithPastWithVM(ModelOutput):
     lm_loss: Optional[torch.FloatTensor] = None
     vm_loss: Optional[torch.FloatTensor] = None
+    eye_loss: Optional[torch.FloatTensor] = None
+    mask_loss: Optional[torch.FloatTensor] = None
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None

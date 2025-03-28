@@ -48,7 +48,7 @@ def print_VLMEvalKit_results(args):
         return convert_01_to_100(res1, res2)
 
     print(f"|{'-'*25}|{'-'*11}|{'-'*11}|")
-    print(f"|{'VLMEvalKit':^47}|")
+    print(f"|{'VLMEvalKit':^49}|")
     print(f"|{'-'*25}|{'-'*11}|{'-'*11}|")
     for bench_name in VLMEvalKit:
         result_path = os.path.join(args.vlmevalkit_root, bench_name)

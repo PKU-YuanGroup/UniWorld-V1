@@ -89,6 +89,22 @@ class ModelArguments:
     mm_train_from_scratch: Optional[bool] = field(default=False)
     
 
+    # eye adapter
+    mm_eye_model_path: Optional[str] = field(default=None)
+    mm_eye_adapter: Optional[str] = field(default=False)
+    pretrain_mm_eye_mlp_adapter: Optional[str] = field(default=None)
+    mm_eye_projector_type: Optional[str] = field(default='linear')
+    mm_eye_depth: Optional[int] = field(default=0)
+    mm_eye_weight: Optional[float] = field(default=1.0)
+
+    # mask adapter
+    mm_mask_ratio: Optional[float] = field(default=0.0)
+    mm_mask_adapter: Optional[str] = field(default=False)
+    pretrain_mm_mask_mlp_adapter: Optional[str] = field(default=None)
+    mm_mask_projector_type: Optional[str] = field(default='mask')
+    mm_mask_depth: Optional[int] = field(default=0)
+    mm_mask_weight: Optional[float] = field(default=1.0)
+
 
 @dataclass
 class DataArguments:
@@ -138,6 +154,11 @@ class TrainingArguments(transformers.TrainingArguments):
     group_by_modality_length: bool = field(default=False)
     save_steps: int = 5000,
     save_total_limit: int = 1,
+
+    # eye
+    mm_eye_projector_lr: Optional[float] = None
+    # mask
+    mm_mask_projector_lr: Optional[float] = None
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -219,14 +240,22 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
         keys_to_match = ['mm_projector']
         weight_mm_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
 
+        # if getattr(trainer.args, "mm_pixel_decoder", False):
         keys_to_match = ['mm_inv_projector']
         weight_mm_inv_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
 
-        # keys_to_match = ['vision_tower']
-        # weight_mm_vision_tower = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
-        # weight_mm_vision_tower = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_mm_vision_tower.items()}
-        # trainer.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
-        # trainer.model.config.save_pretrained(output_dir)
+        keys_to_match = ['mm_eye_projector']
+        weight_mm_eye_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+
+        keys_to_match = ['mm_mask_projector']
+        weight_mm_mask_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+
+        if trainer.args.unfreeze_mm_vision_tower and trainer.args.mm_vision_tower_lr > 0.0:
+            keys_to_match = ['vision_tower']
+            weight_mm_vision_tower = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+            weight_mm_vision_tower = {k.replace('model.vision_tower.vision_tower.', ''): v for k, v in weight_mm_vision_tower.items()}
+            trainer.model.config.mm_vision_tower = os.path.join(output_dir, 'vision_tower')
+            trainer.model.config.save_pretrained(output_dir)
 
         current_folder = output_dir.split('/')[-1]
         parent_folder = os.path.dirname(output_dir)
@@ -244,19 +273,31 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                 os.makedirs(mm_inv_projector_folder, exist_ok=True)
                 torch.save(weight_mm_inv_projector, os.path.join(mm_inv_projector_folder, f'{current_folder}.bin'))
 
-                # mm_vision_tower_folder = os.path.join(parent_folder, 'vision_tower')
-                # os.makedirs(mm_vision_tower_folder, exist_ok=True)
-                # trainer.model.get_vision_tower().image_processor.save_pretrained(mm_vision_tower_folder)
-                # trainer.model.get_vision_tower().vision_tower.config.save_pretrained(mm_vision_tower_folder)
-                # torch.save(weight_mm_vision_tower, os.path.join(mm_vision_tower_folder, f'{current_folder}.bin'))
+                mm_eye_projector_folder = os.path.join(parent_folder, 'mm_eye_projector')
+                os.makedirs(mm_eye_projector_folder, exist_ok=True)
+                torch.save(weight_mm_eye_projector, os.path.join(mm_eye_projector_folder, f'{current_folder}.bin'))
+
+                mm_mask_projector_folder = os.path.join(parent_folder, 'mm_mask_projector')
+                os.makedirs(mm_mask_projector_folder, exist_ok=True)
+                torch.save(weight_mm_mask_projector, os.path.join(mm_mask_projector_folder, f'{current_folder}.bin'))
+
+                if trainer.args.unfreeze_mm_vision_tower and trainer.args.mm_vision_tower_lr > 0.0:
+                    mm_vision_tower_folder = os.path.join(parent_folder, 'vision_tower')
+                    os.makedirs(mm_vision_tower_folder, exist_ok=True)
+                    trainer.model.get_vision_tower().image_processor.save_pretrained(mm_vision_tower_folder)
+                    trainer.model.get_vision_tower().vision_tower.config.save_pretrained(mm_vision_tower_folder)
+                    torch.save(weight_mm_vision_tower, os.path.join(mm_vision_tower_folder, f'{current_folder}.bin'))
             else:
                 torch.save(weight_mm_projector, os.path.join(output_dir, f'mm_projector.bin'))
                 torch.save(weight_mm_inv_projector, os.path.join(output_dir, f'mm_inv_projector.bin'))
+                torch.save(weight_mm_eye_projector, os.path.join(output_dir, f'mm_eye_projector.bin'))
+                torch.save(weight_mm_mask_projector, os.path.join(output_dir, f'mm_mask_projector.bin'))
 
-                # os.makedirs(os.path.join(output_dir, 'vision_tower'), exist_ok=True)
-                # trainer.model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
-                # trainer.model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
-                # torch.save(weight_mm_vision_tower, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
+                if trainer.args.unfreeze_mm_vision_tower and trainer.args.mm_vision_tower_lr > 0.0:
+                    os.makedirs(os.path.join(output_dir, 'vision_tower'), exist_ok=True)
+                    trainer.model.get_vision_tower().image_processor.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+                    trainer.model.get_vision_tower().vision_tower.config.save_pretrained(os.path.join(output_dir, 'vision_tower'))
+                    torch.save(weight_mm_vision_tower, os.path.join(output_dir, 'vision_tower/pytorch_model.bin'))
         return
 
     if trainer.deepspeed:
@@ -894,7 +935,7 @@ def train(attn_implementation="flash_attention_2"):
             )
         ))
 
-    if 'Qwen2' in model_args.model_name_or_path:
+    if 'qwen2' in model_args.model_name_or_path.lower():
         model = RossQwen2ForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -902,7 +943,7 @@ def train(attn_implementation="flash_attention_2"):
             torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
             **bnb_model_from_pretrained_args
         )
-    elif 'vicuna' in model_args.model_name_or_path or 'Llama-3' in model_args.model_name_or_path:
+    elif 'vicuna' in model_args.model_name_or_path:
         model = RossLlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -974,6 +1015,7 @@ def train(attn_implementation="flash_attention_2"):
         model.config.tokenizer_padding_side = tokenizer.padding_side
         model.config.tokenizer_model_max_length = tokenizer.model_max_length
 
+
         model.config.tune_mm_mlp_adapter = training_args.tune_mm_mlp_adapter = model_args.tune_mm_mlp_adapter
         if model_args.tune_mm_mlp_adapter:
             model.requires_grad_(False)
@@ -982,7 +1024,17 @@ def train(attn_implementation="flash_attention_2"):
             if hasattr(model.get_model(), "mm_inv_projector"):
                 for p in model.get_model().mm_inv_projector.parameters():
                     p.requires_grad = True
+            if hasattr(model.get_model(), "mm_eye_projector"):
+                for p in model.get_model().mm_eye_projector.parameters():
+                    p.requires_grad = True
+            if hasattr(model.get_model(), "mm_mask_projector"):
+                for p in model.get_model().mm_mask_projector.parameters():
+                    p.requires_grad = True
 
+        training_args.mm_eye_adapter = model_args.mm_eye_adapter
+        training_args.mm_mask_adapter = model_args.mm_mask_adapter
+
+        training_args.mm_pixel_decoder = model_args.mm_pixel_decoder
         model.config.freeze_mm_mlp_adapter = training_args.freeze_mm_mlp_adapter
         if training_args.freeze_mm_mlp_adapter:
             for p in model.get_model().mm_projector.parameters():
@@ -990,6 +1042,13 @@ def train(attn_implementation="flash_attention_2"):
             if hasattr(model.get_model(), "mm_inv_projector"):
                 for p in model.get_model().mm_inv_projector.parameters():
                     p.requires_grad = False
+            if hasattr(model.get_model(), "mm_eye_projector"):
+                for p in model.get_model().mm_eye_projector.parameters():
+                    p.requires_grad = False
+            if hasattr(model.get_model(), "mm_mask_projector"):
+                for p in model.get_model().mm_mask_projector.parameters():
+                    p.requires_grad = False
+
 
         model.config.unfreeze_mm_vision_tower = training_args.unfreeze_mm_vision_tower = model_args.unfreeze_mm_vision_tower
         if training_args.unfreeze_mm_vision_tower:
@@ -1000,9 +1059,12 @@ def train(attn_implementation="flash_attention_2"):
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
         model.config.mm_projector_lr = training_args.mm_projector_lr
-        model.config.mm_inv_projector_lr = training_args.mm_inv_projector_lr
         model.config.mm_vision_tower_lr = training_args.mm_vision_tower_lr
         model.config.pad_token_id = tokenizer.pad_token_id
+
+        model.config.mm_inv_projector_lr = training_args.mm_inv_projector_lr
+        model.config.mm_eye_projector_lr = training_args.mm_eye_projector_lr
+        model.config.mm_mask_projector_lr = training_args.mm_mask_projector_lr
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer

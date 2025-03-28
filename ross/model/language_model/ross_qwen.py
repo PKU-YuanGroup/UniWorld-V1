@@ -121,6 +121,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
                 boi_ids,
                 eoi_ids,
                 cache_position,
+                encoder_out, 
             ) = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 position_ids,
@@ -132,7 +133,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
                 cache_position,
             )
         else:
-            boi_ids, eoi_ids = None, None
+            boi_ids, eoi_ids, encoder_out = None, None, None
         
         return self.inner_forward(
             input_ids=input_ids,
@@ -149,6 +150,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
             eoi_ids=eoi_ids,
             images=images,
             cache_position=cache_position,
+            encoder_out=encoder_out, 
             **kwargs,
         )
 
@@ -168,6 +170,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
         eoi_ids: Optional[torch.LongTensor] = None,
         images: Optional[torch.FloatTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        encoder_out: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         # mostly obtained from https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2/modeling_qwen2.py
@@ -212,7 +215,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=output_hidden_states or getattr(self.config, 'eye_enable', False) or getattr(self.config, 'mask_enable', False),
             return_dict=return_dict,
             cache_position=cache_position,
             **kwargs,
@@ -233,6 +236,17 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
             vm_loss = self.compute_vm_loss(images, hidden_states, boi_ids, eoi_ids)
             loss = loss + vm_loss
 
+        eye_loss = None
+        if self.training and getattr(self.config, 'eye_enable', False):
+            eye_loss = self.compute_eye_loss(outputs.hidden_states, labels, **kwargs)
+            loss = loss + eye_loss * self.config.mm_eye_weight
+
+        mask_loss = None
+        if self.training and getattr(self.config, 'mask_enable', False):
+            mask, ids_restore = encoder_out.pop('mask'), encoder_out.pop('ids_restore')
+            mask_loss = self.compute_mask_loss(images, outputs.hidden_states, mask, ids_restore, boi_ids, eoi_ids)
+            loss = loss + mask_loss * self.config.mm_mask_weight
+
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
@@ -245,6 +259,8 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
             attentions=outputs.attentions,
             lm_loss=lm_loss,
             vm_loss=vm_loss,
+            eye_loss=eye_loss,
+            mask_loss=mask_loss,
         )
 
     @torch.no_grad()
@@ -271,6 +287,7 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
                 boi_ids,
                 eoi_ids,
                 cache_positions,
+                encoder_out, 
             ) = self.prepare_inputs_labels_for_multimodal(
                 inputs,
                 position_ids,
