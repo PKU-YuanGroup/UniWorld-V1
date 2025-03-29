@@ -22,11 +22,11 @@ JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
 LLM="/storage/lb/checkpoints/lmsys/vicuna-7b-v1.5"
 VISION_ENCODER="/storage/lb/checkpoints/ConvLLaVA/LAION-CLIP-ConvNeXt-Large-512"
-PRETRAIN_DIR="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-newenv-768"
-OUTPUT_DIR="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-sft737k-newenv-768"
-RUN_NAME="llava-conv-vicuna-7b-pt558k-sft737k-newenv-768"
+PRETRAIN_DIR="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-newenv-320"
+OUTPUT_DIR="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-sft737k-newenv-320"
+RUN_NAME="llava-conv-vicuna-7b-pt558k-sft737k-newenv-320"
 
-VISION_SIZE=768
+VISION_SIZE=320
 PROJ_PATCH_SIZE=1
 TRAIN_FROM_SCRATCH=False
 UNFREEZE=False

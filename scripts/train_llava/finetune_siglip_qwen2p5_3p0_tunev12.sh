@@ -21,7 +21,7 @@ conda activate ross_env
 JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-3B-Instruct"
-VISION_ENCODER="/storage/lb/checkpoints/google/siglip-so400m-patch14-384"
+VISION_ENCODER="/storage/lb/logs/ross/llava-siglip-qwen2p5-3p0b-pt558k-newenv-tunev/vision_tower"
 PRETRAIN_DIR="/storage/lb/logs/ross/llava-siglip-qwen2p5-3p0b-pt558k-newenv-tunev"
 OUTPUT_DIR="/storage/lb/logs/ross/llava-siglip-qwen2p5-3p0b-pt558k-sft737k-newenv-tunev12"
 RUN_NAME="llava-siglip-qwen2p5-3p0b-pt558k-sft737k-newenv-tunev12"
