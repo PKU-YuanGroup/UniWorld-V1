@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ross"
+name = "univa"
 version = "1.0.0"
-description = "Reconstructive visual instruction tuning."
+description = "Unified Vision Assistant."
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
@@ -15,7 +15,7 @@ classifiers = [
 dependencies = [
     "torch==2.4.1", "torchvision==0.19.1",
     "transformers==4.50.0", "tokenizers", "sentencepiece==0.1.99", "shortuuid",
-    "accelerate==0.33.0", "peft==0.10.0", "bitsandbytes",
+    "accelerate==1.5.2", "peft==0.10.0", "bitsandbytes",
     "pydantic", "markdown2[all]", "numpy", "scikit-learn==1.2.2",
     "gradio==4.16.0", "gradio_client==0.8.1",
     "requests", "httpx==0.24.0", "uvicorn", "fastapi",
@@ -28,8 +28,8 @@ train = ["deepspeed==0.14.5", "ninja", "wandb==0.19.8"]
 build = ["build", "twine"]
 
 [project.urls]
-"Homepage" = "https://haochen-wang409.github.io/ross/"
-"Bug Tracker" = "https://github.com/haochen-wang409/ross/issues"
+"Homepage" = "https://github.com/PKU-YuanGroup/FlowWorld"
+"Bug Tracker" = "https://github.com/PKU-YuanGroup/FlowWorld/issues"
 
 [tool.setuptools.packages.find]
 exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]

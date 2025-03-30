@@ -32,7 +32,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
-from ..ross_arch import RossMetaModel, RossMetaForCausalLM, CausalLMOutputWithPastWithVM
+from ..univa_arch import UnivaMetaModel, UnivaMetaForCausalLM, CausalLMOutputWithPastWithVM
 
 from transformers.models.llama import modeling_llama
 
@@ -65,23 +65,23 @@ modeling_llama.LlamaMLP = CompiledLlamaMLP
 modeling_llama.LlamaRMSNorm = CompiledLlamaRMSNorm
 modeling_llama.LlamaRotaryEmbedding = CompiledLlamaRotaryEmbedding
 
-class RossConfig(LlamaConfig):
-    model_type = "ross_llama"
+class UnivaConfig(LlamaConfig):
+    model_type = "univa_llama"
 
 
-class RossLlamaModel(RossMetaModel, LlamaModel):
-    config_class = RossConfig
+class UnivaLlamaModel(UnivaMetaModel, LlamaModel):
+    config_class = UnivaConfig
 
     def __init__(self, config: LlamaConfig):
-        super(RossLlamaModel, self).__init__(config)
+        super(UnivaLlamaModel, self).__init__(config)
 
 
-class RossLlamaForCausalLM(LlamaForCausalLM, RossMetaForCausalLM):
-    config_class = RossConfig
+class UnivaLlamaForCausalLM(LlamaForCausalLM, UnivaMetaForCausalLM):
+    config_class = UnivaConfig
 
     def __init__(self, config):
         super(LlamaForCausalLM, self).__init__(config)
-        self.model = RossLlamaModel(config)
+        self.model = UnivaLlamaModel(config)
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -334,5 +334,5 @@ class RossLlamaForCausalLM(LlamaForCausalLM, RossMetaForCausalLM):
         return inputs
 
 
-AutoConfig.register("ross_llama", RossConfig)
-AutoModelForCausalLM.register(RossConfig, RossLlamaForCausalLM)
+AutoConfig.register("univa_llama", UnivaConfig)
+AutoModelForCausalLM.register(UnivaConfig, UnivaLlamaForCausalLM)

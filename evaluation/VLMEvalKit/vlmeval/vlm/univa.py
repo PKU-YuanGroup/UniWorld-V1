@@ -7,16 +7,16 @@ from .base import BaseModel
 from ..smp import *
 from ..dataset import DATASET_TYPE
 
-class Ross(BaseModel):
+class UniVA(BaseModel):
 
     INSTALL_REQ = True
     INTERLEAVE = True
 
     def __init__(self,
-                 model_path='HaochenWang/ross-qwen2-7b',
+                 model_path='',
                  **kwargs):
-        from ross.model.builder import load_pretrained_model
-        from ross.mm_utils import get_model_name_from_path
+        from univa.model.builder import load_pretrained_model
+        from univa.mm_utils import get_model_name_from_path
 
         assert osp.exists(model_path) or splitlen(model_path) == 2
 
@@ -39,7 +39,7 @@ class Ross(BaseModel):
         elif 'llama3' in model_path.lower():
             self.conv_mode = 'llama3'
         else:
-            self.conv_mode = 'llava_v1'
+            self.conv_mode = 'v1'
         
         if getattr(self.model.config, 'conv_mode', False):
             self.conv_mode = self.model.config.conv_mode
@@ -119,10 +119,10 @@ class Ross(BaseModel):
         return message
 
     def generate_inner(self, message, dataset=None):
-        from ross.mm_utils import process_images, tokenizer_image_token, KeywordsStoppingCriteria
-        from ross.constants import (
+        from univa.mm_utils import process_images, tokenizer_image_token, KeywordsStoppingCriteria
+        from univa.constants import (
             IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN)
-        from ross.conversation import conv_templates, SeparatorStyle
+        from univa.conversation import conv_templates, SeparatorStyle
 
         # Support interleave text and image
         conv = conv_templates[self.conv_mode].copy()

@@ -8,3 +8,4 @@
 *egg-info
 *.pb
 **/vgg.pth
+logs

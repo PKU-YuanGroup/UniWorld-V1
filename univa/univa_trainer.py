@@ -137,7 +137,7 @@ class LengthGroupedSampler(Sampler):
         return iter(indices)
 
 
-class RossTrainer(Trainer):
+class UniVATrainer(Trainer):
 
     def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
         if self.train_dataset is None or not has_length(self.train_dataset):
@@ -309,7 +309,7 @@ class RossTrainer(Trainer):
                 torch.save(weight_to_save, os.path.join(output_dir, f'mm_mask_projector.bin'))
         else:
             self.model.generation_config.do_sample = True
-            super(RossTrainer, self)._save_checkpoint(model, trial)
+            super(UniVATrainer, self)._save_checkpoint(model, trial)
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         if self.args.local_rank == 0 or self.args.local_rank == -1:
@@ -329,7 +329,7 @@ class RossTrainer(Trainer):
             pass
         else:
             self.model.generation_config.do_sample = True
-            super(RossTrainer, self)._save(output_dir, state_dict)
+            super(UniVATrainer, self)._save(output_dir, state_dict)
             
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         loss, outputs = super().compute_loss(model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)

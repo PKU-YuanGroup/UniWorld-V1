@@ -30,7 +30,7 @@ from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_projector.builder import build_vision_projector, build_inv_projector, build_eye_projector, build_mask_projector
 from .pixel_decoder.builder import build_pixel_decoder
 
-from ross.constants import (
+from univa.constants import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
     DEFAULT_IMAGE_PATCH_TOKEN,
@@ -38,13 +38,13 @@ from ross.constants import (
     DEFAULT_IM_END_TOKEN,
 )
 
-from ross.mm_utils import get_anyres_image_grid_shape
+from univa.mm_utils import get_anyres_image_grid_shape
 
 
-class RossMetaModel:
+class UnivaMetaModel:
 
     def __init__(self, config):
-        super(RossMetaModel, self).__init__(config)
+        super(UnivaMetaModel, self).__init__(config)
 
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=False)
@@ -108,6 +108,10 @@ class RossMetaModel:
 
         # for convnext
         self.config.mm_vision_resolution = model_args.mm_vision_resolution
+        
+        self.config.mm_anyres = model_args.mm_anyres
+        self.config.mm_anyres_min_pixels = model_args.mm_anyres_min_pixels
+        self.config.mm_anyres_max_pixels = model_args.mm_anyres_max_pixels
 
         ## build eye projector
         self.config.mm_eye_model_path = model_args.mm_eye_model_path
@@ -268,7 +272,7 @@ def count_consecutive_blocks(lst, v):
     return block_count
 
 
-class RossMetaForCausalLM(ABC):
+class UnivaMetaForCausalLM(ABC):
 
     @abstractmethod
     def get_model(self):
@@ -280,71 +284,23 @@ class RossMetaForCausalLM(ABC):
     def encode_images(self, images):
         encoder_out = self.get_model().get_vision_tower()(images, return_cls_token=False)
         image_features = encoder_out.pop('image_features')
-        image_features = self.get_model().mm_projector(image_features)
+        if isinstance(image_features, list):
+            image_features = [self.get_model().mm_projector(i)[0] for i in image_features]
+        else:
+            image_features = self.get_model().mm_projector(image_features)
         return image_features, encoder_out
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
         images, image_sizes=None, cache_position=None,
-    ):
+    ):  
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, cache_position, None
 
-        if type(images) is list or images.ndim == 5:
-            if type(images) is list:
-                images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
-            concat_images = torch.cat([image for image in images], dim=0)
-            image_features, encoder_out = self.encode_images(concat_images)
-            split_sizes = [image.shape[0] for image in images]
-            image_features = torch.split(image_features, split_sizes, dim=0)
-            mm_patch_merge_type = getattr(self.config, 'mm_patch_merge_type', 'flat')
-            image_aspect_ratio = getattr(self.config, 'image_aspect_ratio', 'square')
-            if mm_patch_merge_type == 'flat':
-                image_features = [x.flatten(0, 1) for x in image_features]
-            elif mm_patch_merge_type.startswith('spatial'):
-                new_image_features = []
-                for image_idx, image_feature in enumerate(image_features):
-                    if image_feature.shape[0] > 1:
-                        base_image_feature = image_feature[0]
-                        image_feature = image_feature[1:]
-                        height = width = self.get_vision_tower().num_patches_per_side
-                        assert height * width == base_image_feature.shape[0]
-                        if image_aspect_ratio == 'anyres':
-                            num_patch_width, num_patch_height = get_anyres_image_grid_shape(image_sizes[image_idx],
-                                                                                            self.config.image_grid_pinpoints,
-                                                                                            self.get_vision_tower().config.image_size)
-                            image_feature = image_feature.view(num_patch_height, num_patch_width, height, width, -1)
-                        else:
-                            raise NotImplementedError
-                        if 'unpad' in mm_patch_merge_type:
-                            image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
-                            image_feature = image_feature.flatten(1, 2).flatten(2, 3)
-                            image_feature = unpad_image(image_feature, image_sizes[image_idx])
-                            image_feature = torch.cat((
-                                image_feature,
-                                self.model.image_newline[:, None, None].expand(*image_feature.shape[:-1], 1).to(
-                                    image_feature.device)
-                            ), dim=-1)
-                            image_feature = image_feature.flatten(1, 2).transpose(0, 1)
-                        else:
-                            image_feature = image_feature.permute(0, 2, 1, 3, 4).contiguous()
-                            image_feature = image_feature.flatten(0, 3)
-                        image_feature = torch.cat((base_image_feature, image_feature), dim=0)
-                    else:
-                        image_feature = image_feature[0]
-                        if 'unpad' in mm_patch_merge_type:
-                            image_feature = torch.cat((
-                                image_feature,
-                                self.model.image_newline[None].to(image_feature.device)
-                            ), dim=0)
-                    new_image_features.append(image_feature)
-                image_features = new_image_features
-            else:
-                raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
-        else:
-            image_features, encoder_out = self.encode_images(images)
-
+        image_features, encoder_out = self.encode_images(images)
+        
+        
         # Let's just add dummy tensors if they do not exist,
         # it is a headache to deal with None all the time.
         # But it is not ideal, and if you have a better idea,
@@ -370,7 +326,7 @@ class RossMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
-        boi_ids, eoi_ids = [None for _ in range(len(input_ids))], [None for _ in range(len(input_ids))]
+        boi_ids, eoi_ids = [[] for _ in range(len(input_ids))], [[] for _ in range(len(input_ids))]
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             # images have been normalized by CLIP
@@ -386,11 +342,10 @@ class RossMetaForCausalLM(ABC):
             image_position = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist()
             # assert len(image_position) == 1
 
-            # if count_consecutive_blocks(labels[batch_idx].cpu().numpy(), -100) == 2:
-            #     boi_ids[batch_idx] = image_position[0]
-            #     eoi_ids[batch_idx] = image_position[0] + image_features.shape[1] - 1
-            boi_ids[batch_idx] = image_position[0]
-            eoi_ids[batch_idx] = image_position[0] + image_features.shape[1] - 1
+            for i in range(num_images):
+                boi_ids[batch_idx].append(image_position[i])
+                eoi_ids[batch_idx].append(image_position[i] + image_features[cur_image_idx+i].shape[0] - 1)
+
             image_token_indices = [-1] + image_position + [cur_input_ids.shape[0]]
 
             cur_input_ids_noim = []
@@ -484,7 +439,7 @@ class RossMetaForCausalLM(ABC):
             attention_mask.shape[1], device=attention_mask.device)
 
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, boi_ids, eoi_ids, cache_position, encoder_out
-
+      
     def compute_vm_loss(
         self,
         images: torch.Tensor,

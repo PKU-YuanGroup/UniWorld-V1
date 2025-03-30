@@ -21,7 +21,7 @@ import sys
 from dataclasses import dataclass, field
 from collections import OrderedDict
 import datetime
-import builtins
+import math
 import json
 import logging
 import pathlib
@@ -34,7 +34,7 @@ import transformers
 import tokenizers
 import megfile
 
-from ross.constants import (
+from univa.constants import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
     DEFAULT_IMAGE_TOKEN,
@@ -42,11 +42,11 @@ from ross.constants import (
     DEFAULT_IM_END_TOKEN,
 )
 from torch.utils.data import Dataset
-from ross.ross_trainer import RossTrainer
+from univa.univa_trainer import UniVATrainer
 
-from ross import conversation as conversation_lib
-from ross.model import *
-from ross.mm_utils import tokenizer_image_token
+from univa import conversation as conversation_lib
+from univa.model import *
+from univa.mm_utils import tokenizer_image_token, smart_resize
 
 from PIL import Image
 from PIL import ImageFile
@@ -79,7 +79,7 @@ class ModelArguments:
     pretrain_mm_inv_mlp_adapter: Optional[str] = field(default=None)
 
     mm_projector_type: Optional[str] = field(default='linear')
-    mm_inv_projector_type: Optional[str] = field(default='linear')
+    mm_inv_projector_type: Optional[str] = field(default='linear')    
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
 
@@ -114,6 +114,8 @@ class DataArguments:
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default=None)
     image_aspect_ratio: str = 'square'
+    mm_anyres_min_pixels: int = 320*320
+    mm_anyres_max_pixels: int = 864*864
 
 
 @dataclass
@@ -427,6 +429,19 @@ def preprocess_multimodal(
             sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
     return sources
 
+def expand2square(pil_img, background_color):
+    width, height = pil_img.size
+    if width == height:
+        return pil_img
+    elif width > height:
+        result = Image.new(pil_img.mode, (width, width), background_color)
+        result.paste(pil_img, (0, (width - height) // 2))
+        return result
+    else:
+        result = Image.new(pil_img.mode, (height, height), background_color)
+        result.paste(pil_img, ((height - width) // 2, 0))
+        return result
+                
 def preprocess_v1(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -809,6 +824,32 @@ class LazySupervisedDataset(Dataset):
             length_list.append(cur_len)
         return length_list
 
+    def process_image(self, image_file):
+        image_folder = self.data_args.image_folder
+        processor = self.data_args.image_processor
+        with megfile.smart_open(os.path.join(image_folder, image_file), "rb") as f:
+            bytes_data = f.read()
+        image = Image.open(io.BytesIO(bytes_data), 'r').convert('RGB')
+        raw_w, raw_h = image.size
+        if self.data_args.image_aspect_ratio == 'pad':
+            image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+            image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+        elif self.data_args.image_aspect_ratio == 'square':
+            # center crop
+            image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+        elif self.data_args.image_aspect_ratio == 'anyres':
+            assert 'conv' in self.data_args.vision_tower.lower()
+            assert processor.anyres
+            size = (raw_h, raw_w)
+            h_bar, w_bar = smart_resize(raw_h, raw_w, factor=32, max_pixels=processor.min_pixels, min_pixels=processor.min_pixels)
+            size = {'shortest_edge': min(h_bar, w_bar)}
+            crop_size = (h_bar, w_bar)
+            image = processor.preprocess(image, size=size, crop_size=crop_size, return_tensors='pt')['pixel_values'][0]
+        else:
+            raise NotImplementedError(f"Only support {'pad', 'square', 'anyres'}, but found {self.data_args.image_aspect_ratio}")
+        image_size = image.shape[1:]
+        return image, image_size
+
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
         if isinstance(i, int):
@@ -816,29 +857,11 @@ class LazySupervisedDataset(Dataset):
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
         if 'image' in sources[0]:
             image_file = self.list_data_dict[i]['image']
-            image_folder = self.data_args.image_folder
-            processor = self.data_args.image_processor
-            with megfile.smart_open(os.path.join(image_folder, image_file), "rb") as f:
-                bytes_data = f.read()
-            image = Image.open(io.BytesIO(bytes_data), 'r').convert('RGB')
-            if self.data_args.image_aspect_ratio == 'pad':
-                def expand2square(pil_img, background_color):
-                    width, height = pil_img.size
-                    if width == height:
-                        return pil_img
-                    elif width > height:
-                        result = Image.new(pil_img.mode, (width, width), background_color)
-                        result.paste(pil_img, (0, (width - height) // 2))
-                        return result
-                    else:
-                        result = Image.new(pil_img.mode, (height, height), background_color)
-                        result.paste(pil_img, ((height - width) // 2, 0))
-                        return result
-                image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            else:
-                # center crop
-                image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
+            image_file = [image_file] if not isinstance(image_file, list) else image_file
+            '''
+            [[image, size], [image, size]]
+            '''
+            image = [self.process_image(f) for f in image_file]
             sources = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
@@ -858,7 +881,7 @@ class LazySupervisedDataset(Dataset):
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = torch.zeros(3, crop_size['height'], crop_size['width'])
+            data_dict['image'] = [torch.zeros(3, crop_size['height'], crop_size['width']), (crop_size['height'], crop_size['width'])]
         return data_dict
 
 
@@ -888,11 +911,19 @@ class DataCollatorForSupervisedDataset(object):
 
         if 'image' in instances[0]:
             images = [instance['image'] for instance in instances]
+            '''
+            [
+            [[image, size], [image, size]]
+            [[image, size]]
+            ]
+            '''
+            batch["image_sizes"] = [im[1] for im_list in images for im in im_list]
+            images = [im[0] for im_list in images for im in im_list]
+
             if all(x is not None and x.shape == images[0].shape for x in images):
                 batch['images'] = torch.stack(images)
             else:
                 batch['images'] = images
-
         return batch
 
 
@@ -936,7 +967,7 @@ def train(attn_implementation="flash_attention_2"):
         ))
 
     if 'qwen2' in model_args.model_name_or_path.lower():
-        model = RossQwen2ForCausalLM.from_pretrained(
+        model = UnivaQwen2ForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
@@ -944,7 +975,7 @@ def train(attn_implementation="flash_attention_2"):
             **bnb_model_from_pretrained_args
         )
     elif 'vicuna' in model_args.model_name_or_path:
-        model = RossLlamaForCausalLM.from_pretrained(
+        model = UnivaLlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
@@ -999,6 +1030,9 @@ def train(attn_implementation="flash_attention_2"):
             model_args.version = "v1"
 
     model.config.conv_mode = model_args.version
+    model_args.mm_anyres = data_args.image_aspect_ratio == 'anyres'
+    model_args.mm_anyres_min_pixels = data_args.mm_anyres_min_pixels
+    model_args.mm_anyres_max_pixels = data_args.mm_anyres_max_pixels
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(
             model_args=model_args,
@@ -1008,6 +1042,8 @@ def train(attn_implementation="flash_attention_2"):
         vision_tower = model.get_vision_tower()
         vision_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
 
+        data_args.vision_tower = model_args.vision_tower
+        
         data_args.image_processor = vision_tower.image_processor
         data_args.is_multimodal = True
 
@@ -1090,7 +1126,7 @@ def train(attn_implementation="flash_attention_2"):
 
     data_module = make_supervised_data_module(tokenizer=tokenizer,
                                               data_args=data_args)
-    trainer = RossTrainer(
+    trainer = UniVATrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,

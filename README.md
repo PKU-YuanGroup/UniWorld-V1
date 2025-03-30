@@ -1,8 +1,8 @@
 
 # Prepare env
 ```
-conda create -n ross_env python=3.10 -y
-conda activate ross_env
+conda create -n univa python=3.10 -y
+conda activate univa
 
 pip install --upgrade pip  # enable PEP 660 support
 pip install -e .
@@ -80,15 +80,15 @@ TODO
 
 ## Pretrain
 ```
-cd /storage/lb/ross
-conda activate ross_env
+cd /storage/lb/univa/FlowWorld
+conda activate univa
 bash scripts/train_ross/pretrain_clip_qwen2_0p5.sh
 ```
 
 ## Finetune
 ```
-cd /storage/lb/ross
-conda activate ross_env
+cd /storage/lb/univa/FlowWorld
+conda activate univa
 bash scripts/train_ross/finetune_clip_qwen2_0p5_chatml.sh
 ```
 
@@ -103,8 +103,8 @@ The data of benchmarks will be downloaded automatically.
 **Run VLMEvalKit**
 
 ```
-conda activate ross_env
-cd /storage/lb/ross/evaluation/VLMEvalKit
+conda activate univa
+cd /storage/lb/univa/FlowWorld/evaluation/VLMEvalKit
 
 MODEL_PATH="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-sft737k-newenv-768"
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per-node=8 run.py \
@@ -125,8 +125,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 CUDA_LAUNCH_BLOCKING=1 torchrun --nproc-per
 **Print results quickly**
 
 ```
-conda activate ross_env
-cd /storage/lb/ross
+conda activate univa
+cd /storage/lb/univa/FlowWorld
 vlmevalkit="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-sft737k-newenv-768/eval/VLMEvalKit/T20250329_G"
 python tools/print_results.py --vlmevalkit_root ${vlmevalkit} 
 ```
@@ -150,8 +150,8 @@ tar -xf mmvp_cache.tar
 This step will download dataset if do not exist offline MMVP data.
 
 ```
-conda activate ross_env
-cd /storage/lb/ross/evaluation/MMVP
+conda activate univa
+cd /storage/lb/univa/FlowWorld/evaluation/MMVP
 
 HF_HOME="/storage/lb/logs/ross/mmvp_cache"
 MODEL_PATH="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-sft737k-newenv-768"

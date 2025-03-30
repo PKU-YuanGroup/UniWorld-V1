@@ -7,7 +7,7 @@ import argparse
 import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from ross import RossLlamaForCausalLM
+from univa import UnivaLlamaForCausalLM
 
 
 def apply_delta(base_model_path, target_model_path, delta_path):
@@ -16,7 +16,7 @@ def apply_delta(base_model_path, target_model_path, delta_path):
         base_model_path, torch_dtype=torch.float16, low_cpu_mem_usage=True)
 
     print("Loading delta")
-    delta = RossLlamaForCausalLM.from_pretrained(delta_path, torch_dtype=torch.float16, low_cpu_mem_usage=True)
+    delta = UnivaLlamaForCausalLM.from_pretrained(delta_path, torch_dtype=torch.float16, low_cpu_mem_usage=True)
     delta_tokenizer = AutoTokenizer.from_pretrained(delta_path)
 
     print("Applying delta")

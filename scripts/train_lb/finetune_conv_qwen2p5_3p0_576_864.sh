@@ -16,16 +16,23 @@ export NCCL_IB_RETRY_CNT=32
 export TOKENIZERS_PARALLELISM=false
 
 
-cd /storage/lb/ross
-conda activate ross_env
+cd /storage/lb/univa/FlowWorld
+conda activate univa
 JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
-LLM="/storage/lb/checkpoints/Qwen/Qwen2-7B-Instruct"
-VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
-VISION_DECODER="/storage/lb/checkpoints/pretrained_vae"
-PRETRAIN_DIR="/storage/lb/logs/ross/ross-clip-qwen2-7b-pt558k"
-OUTPUT_DIR="/storage/lb/logs/ross/ross-clip-qwen2-7b-pt558k-sft737k"
-RUN_NAME="ross-clip-qwen2-7b-pt558k-sft737k"
+LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-3B-Instruct"
+VISION_ENCODER="/storage/lb/checkpoints/ConvLLaVA/LAION-CLIP-ConvNeXt-Large-512"
+PRETRAIN_DIR="./logs/ross/llava-conv-qwen2p5-3p0b-pt558k-newenv-576-864"
+OUTPUT_DIR="./logs/ross/llava-conv-qwen2p5-3p0b-pt558k-sft737k-newenv-576-864"
+RUN_NAME="llava-conv-qwen2p5-3p0b-pt558k-sft737k-newenv-576-864"
+
+VISION_SIZE=320
+PROJ_PATCH_SIZE=1
+TRAIN_FROM_SCRATCH=False
+UNFREEZE=False
+VISION_LR=1e-3
+PROJ_LR=1e-3
+LR_SCHEDULER="cosine"
 
 mkdir -p ${OUTPUT_DIR}
 
@@ -33,27 +40,33 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 8 \
-    --gradient_accumulation_steps 2 \
+    --per_device_train_batch_size 4 \
+    --gradient_accumulation_steps 4 \
     --learning_rate 2e-5 \
     --warmup_ratio 0.03 \
     \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path ${LLM} \
     --pretrain_mm_mlp_adapter ${PRETRAIN_DIR}/mm_projector.bin \
-    --pretrain_mm_inv_mlp_adapter ${PRETRAIN_DIR}/mm_inv_projector.bin \
     --output_dir ${OUTPUT_DIR} \
     --vision_tower ${VISION_ENCODER} \
-    --version qwen_2 \
-    --mm_pixel_decoder ${VISION_DECODER} \
+    --version qwen_chatml \
     \
     --data_path ${JSON_FOLDER}/Cambrian737k.json \
     --image_folder ${IMAGE_FOLDER} \
     \
-    --mm_projector_type mlp2x_gelu \
-    --mm_inv_projector_type denoiser_vit3x \
+    --mm_vision_resolution ${VISION_SIZE} \
+    --mm_projector_type conv2x_gelu_p${PROJ_PATCH_SIZE} \
+    --mm_train_from_scratch ${TRAIN_FROM_SCRATCH} \
+    --unfreeze_mm_vision_tower ${UNFREEZE} \
+    --mm_vision_tower_lr ${VISION_LR} \
+    \
     --mm_vision_select_layer -2 \
-    --image_aspect_ratio pad \
+    \
+    --image_aspect_ratio anyres \
+    --mm_anyres_min_pixels $((576 * 576)) \
+    --mm_anyres_max_pixels $((864 * 864)) \
+    \
     --group_by_modality_length True \
     --bf16 True \
     --num_train_epochs 1 \
@@ -64,7 +77,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --save_total_limit 1 \
     --save_only_model \
     --weight_decay 0. \
-    --lr_scheduler_type "cosine" \
+    --lr_scheduler_type ${LR_SCHEDULER} \
     --logging_steps 1 \
     --tf32 True \
     --model_max_length 4096 \
@@ -72,4 +85,4 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
     --report_to wandb \
-    --run_name ${RUN_NAME} >> ${OUTPUT_DIR}/log.txt
+    --run_name ${RUN_NAME} >> logs/conv_any_ft.txt

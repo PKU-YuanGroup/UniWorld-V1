@@ -8,7 +8,7 @@ from tqdm import tqdm
 from einops import repeat, rearrange
 from timm.models.vision_transformer import PatchEmbed, Mlp
 
-from ross.model.multimodal_denoiser.diffusion_utils import create_diffusion
+from univa.model.multimodal_denoiser.diffusion_utils import create_diffusion
 
 @torch.compile
 def modulate(x, shift, scale):

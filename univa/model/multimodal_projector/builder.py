@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import re
 from transformers.models.convnext.modeling_convnext import ConvNextLayerNorm
-from ross.model.multimodal_denoiser.denoiser_dit import RossDenoiser
+from univa.model.multimodal_denoiser.denoiser_dit import RossDenoiser
 
 
 class IdentityMap(nn.Module):
@@ -150,7 +150,7 @@ def build_mask_projector(config, delay_load=False, **kwargs):
     projector_type = getattr(config, 'mm_mask_projector_type', 'mask')
 
     if projector_type.startswith("mask"):
-        from ross.model.multimodal_decoder.mask_decoder_vit import MaskedAutoencoderViT
+        from univa.model.multimodal_decoder.mask_decoder_vit import MaskedAutoencoderViT
         return MaskedAutoencoderViT(
             in_chans=3,
             embed_dim=config.hidden_size,

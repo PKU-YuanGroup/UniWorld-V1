@@ -6,7 +6,7 @@ import math
 import ast
 
 from transformers import StoppingCriteria
-from ross.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
+from univa.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN
 
 
 def select_best_resolution(original_size, possible_resolutions):
@@ -140,10 +140,10 @@ def process_anyres_image(image, processor, grid_pinpoints):
     # FIXME: this seems to be a bug that it resizes instead of pad.
     # but to keep it consistent with previous, i will keep it as it is
     # TODO: uncomment below to ablate with the padding
-    if isinstance(processor.size, dict):
-        shortest_edge = processor.size["shortest_edge"]
-    else:
-        shortest_edge = min(processor.size)
+    # if isinstance(processor.size, dict):
+    #     shortest_edge = processor.size["shortest_edge"]
+    # else:
+    shortest_edge = min(list(processor.size.values()))
     image_original_resize = image.resize((shortest_edge, shortest_edge))
 
     image_patches = [image_original_resize] + patches
@@ -170,8 +170,52 @@ def expand2square(pil_img, background_color):
         return result
 
 
+def round_by_factor(number: int, factor: int) -> int:
+    """Returns the closest integer to 'number' that is divisible by 'factor'."""
+    return round(number / factor) * factor
+
+
+def ceil_by_factor(number: int, factor: int) -> int:
+    """Returns the smallest integer greater than or equal to 'number' that is divisible by 'factor'."""
+    return math.ceil(number / factor) * factor
+
+
+def floor_by_factor(number: int, factor: int) -> int:
+    """Returns the largest integer less than or equal to 'number' that is divisible by 'factor'."""
+    return math.floor(number / factor) * factor
+
+
+def smart_resize(
+    height: int, width: int, factor: int = 32, min_pixels: int = 864*864, max_pixels: int = 320*320
+) -> tuple[int, int]:
+    """
+    Rescales the image so that the following conditions are met:
+
+    1. Both dimensions (height and width) are divisible by 'factor'.
+
+    2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
+
+    3. The aspect ratio of the image is maintained as closely as possible.
+    """
+    # if max(height, width) / min(height, width) > MAX_RATIO:
+    #     raise ValueError(
+    #         f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
+    #     )
+    h_bar = max(factor, round_by_factor(height, factor))
+    w_bar = max(factor, round_by_factor(width, factor))
+    if h_bar * w_bar > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        h_bar = floor_by_factor(height / beta, factor)
+        w_bar = floor_by_factor(width / beta, factor)
+    elif h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        h_bar = ceil_by_factor(height * beta, factor)
+        w_bar = ceil_by_factor(width * beta, factor)
+    return h_bar, w_bar
+
 def process_images(images, image_processor, model_cfg):
     image_aspect_ratio = getattr(model_cfg, "image_aspect_ratio", None)
+    vision_tower = model_cfg.vision_tower
     new_images = []
     if image_aspect_ratio == 'pad':
         for image in images:
@@ -179,11 +223,21 @@ def process_images(images, image_processor, model_cfg):
             image = image_processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             new_images.append(image)
     elif image_aspect_ratio == "anyres":
+        assert 'conv' in vision_tower.lower()
+        min_pixels = model_cfg.mm_anyres_min_pixels
+        max_pixels = model_cfg.mm_anyres_max_pixels
         for image in images:
-            image = process_anyres_image(image, image_processor, model_cfg.image_grid_pinpoints)
+            raw_w, raw_h = image.size
+            size = (raw_h, raw_w)
+            h_bar, w_bar = smart_resize(raw_h, raw_w, factor=32, max_pixels=min_pixels, min_pixels=max_pixels)
+            size = {'shortest_edge': min(h_bar, w_bar)}
+            crop_size = (h_bar, w_bar)
+            image = image_processor.preprocess(image, size=size, crop_size=crop_size, return_tensors='pt')['pixel_values'][0]
             new_images.append(image)
-    else:
+    elif image_aspect_ratio == "square":
         return image_processor(images, return_tensors='pt')['pixel_values']
+    else:
+        raise NotImplementedError(f"Only support {'pad', 'square', 'anyres'}, but found {image_aspect_ratio}")
     if all(x.shape == new_images[0].shape for x in new_images):
         new_images = torch.stack(new_images, dim=0)
     return new_images

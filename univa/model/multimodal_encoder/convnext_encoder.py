@@ -3,6 +3,25 @@ import torch.nn as nn
 import math
 from transformers import ConvNextModel, CLIPImageProcessor, ConvNextConfig
 
+# class CompiledCLIPMLP(modeling_clip.CLIPMLP):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+
+#     @torch.compile
+#     def forward(self, *args, **kwargs):
+#         return super().forward(*args, **kwargs)
+    
+# class CompiledLayerNorm(nn.LayerNorm):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+
+#     @torch.compile
+#     def forward(self, *args, **kwargs):
+#         return super().forward(*args, **kwargs)
+    
+# modeling_clip.CLIPMLP = CompiledCLIPMLP
+# modeling_clip.nn.LayerNorm = CompiledLayerNorm
+
 class ConvNeXtCLIPVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
         super().__init__()
@@ -14,8 +33,12 @@ class ConvNeXtCLIPVisionTower(nn.Module):
         self.mm_vision_resolution = getattr(args, 'mm_vision_resolution', False)
         self.mm_train_from_scratch = getattr(args, 'mm_train_from_scratch', False)
         self.mm_vision_patch_size = getattr(args, 'mm_vision_patch_size', False)
+        self.mm_anyres = getattr(args, 'mm_anyres', False)
+        self.mm_anyres_min_pixels = getattr(args, 'mm_anyres_min_pixels', 320*320)
+        self.mm_anyres_max_pixels = getattr(args, 'mm_anyres_max_pixels', 864*864)
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
         self.unfreeze = getattr(args, 'unfreeze_mm_vision_tower', False)
+
 
         self.mm_mask_ratio = getattr(args, 'mm_mask_ratio', 0.0)
         if not delay_load:
@@ -29,6 +52,11 @@ class ConvNeXtCLIPVisionTower(nn.Module):
             return
 
         self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
+        
+        self.image_processor.anyres = self.mm_anyres
+        self.image_processor.min_pixels = self.mm_anyres_min_pixels
+        self.image_processor.max_pixels = self.mm_anyres_max_pixels
+
         if self.mm_train_from_scratch:
             config = ConvNextConfig.from_pretrained(self.vision_tower_name)
             self.vision_tower = ConvNextModel._from_config(config)
@@ -83,7 +111,7 @@ class ConvNeXtCLIPVisionTower(nn.Module):
                                                         return_dict=True)  # B C H W
                 # image_feature = image_feature.hidden_states[-1].permute(0, 2, 3, 1)
                 # image_feature = image_feature.reshape(image_features.shape[0], -1, image_features.shape[3]).to(images.dtype)
-                image_feature = image_feature.hidden_states[-1].to(images.dtype)
+                image_feature = image_feature.hidden_states[-1].to(image.dtype)
 
                 image_features.append(image_feature)
         else:
@@ -96,7 +124,7 @@ class ConvNeXtCLIPVisionTower(nn.Module):
             image_features = image_features.hidden_states[-1].to(images.dtype)
         return {'image_features': image_features}
 
-    @torch.compile
+    # @torch.compile
     def forward(self, images, return_cls_token=False):
         if self.unfreeze:
             encoder_output = self.inner_forward(images) if self.mm_mask_ratio == 0.0 else self.mask_inner_forward(images)

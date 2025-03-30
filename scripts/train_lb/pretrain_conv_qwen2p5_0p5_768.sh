@@ -16,8 +16,8 @@ export NCCL_IB_RETRY_CNT=32
 export TOKENIZERS_PARALLELISM=false
 
 
-cd /storage/lb/ross
-conda activate ross_env
+cd /storage/lb/univa/FlowWorld
+conda activate univa
 JSON_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA/train_json"
 IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-0.5B-Instruct"

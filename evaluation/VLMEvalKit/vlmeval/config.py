@@ -366,8 +366,8 @@ h2ovl_series = {
     'h2ovl-mississippi-1b': partial(H2OVLChat, model_path='h2oai/h2ovl-mississippi-800m'),
 }
 
-ross_series = {
-    'ross': Ross,
+univa_series = {
+    'univa': UniVA,
 }
 
 supported_VLM = {}
@@ -381,7 +381,7 @@ model_groups = [
     mantis_series, mmalaya_series, phi3_series, xgen_mm_series, qwen2vl_series, 
     slime_series, eagle_series, moondream_series, llama_series, molmo_series,
     kosmos_series, points_series, nvlm_series, vintern_series, h2ovl_series, aria_series,
-    smolvlm_series, ross_series
+    smolvlm_series, univa_series
 ]
 
 for grp in model_groups:

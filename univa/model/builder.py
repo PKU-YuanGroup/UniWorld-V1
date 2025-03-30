@@ -20,8 +20,8 @@ import shutil
 
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, BitsAndBytesConfig
 import torch
-from ross.model import *
-from ross.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from univa.model import *
+from univa.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
@@ -47,18 +47,18 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         kwargs['attn_implementation'] = 'flash_attention_2'
 
     if 'qwen2' in model_name.lower():
-        print(f'=> loading RossQwen2ForCausalLM ...')
+        print(f'=> loading UnivaQwen2ForCausalLM ...')
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-        model = RossQwen2ForCausalLM.from_pretrained(
+        model = UnivaQwen2ForCausalLM.from_pretrained(
             model_path,
             low_cpu_mem_usage=True,
             ignore_mismatched_sizes=True,
             **kwargs
         )
     else:
-        print(f'=> loading RossLlamaForCausalLM ...')
+        print(f'=> loading UnivaLlamaForCausalLM ...')
         tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
-        model = RossLlamaForCausalLM.from_pretrained(
+        model = UnivaLlamaForCausalLM.from_pretrained(
             model_path,
             low_cpu_mem_usage=True,
             ignore_mismatched_sizes=True,

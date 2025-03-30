@@ -32,7 +32,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, \
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput
 
-from ..ross_arch import RossMetaModel, RossMetaForCausalLM, CausalLMOutputWithPastWithVM
+from ..univa_arch import UnivaMetaModel, UnivaMetaForCausalLM, CausalLMOutputWithPastWithVM
 
 from transformers.models.qwen2 import modeling_qwen2
 
@@ -66,23 +66,23 @@ modeling_qwen2.Qwen2RMSNorm = CompiledQwen2RMSNorm
 modeling_qwen2.Qwen2RotaryEmbedding = CompiledQwen2RotaryEmbedding
 
 
-class RossConfig(Qwen2Config):
-    model_type = "ross_qwen2"
+class UnivaConfig(Qwen2Config):
+    model_type = "univa_qwen2"
 
 
-class RossQwen2Model(RossMetaModel, Qwen2Model):
-    config_class = RossConfig
+class UnivaQwen2Model(UnivaMetaModel, Qwen2Model):
+    config_class = UnivaConfig
 
     def __init__(self, config: Qwen2Config):
-        super(RossQwen2Model, self).__init__(config)
+        super(UnivaQwen2Model, self).__init__(config)
 
 
-class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
-    config_class = RossConfig
+class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
+    config_class = UnivaConfig
 
     def __init__(self, config):
         super(Qwen2ForCausalLM, self).__init__(config)
-        self.model = RossQwen2Model(config)
+        self.model = UnivaQwen2Model(config)
         # self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -329,5 +329,5 @@ class RossQwen2ForCausalLM(Qwen2ForCausalLM, RossMetaForCausalLM):
 
 
 
-AutoConfig.register("ross_qwen2", RossConfig)
-AutoModelForCausalLM.register(RossConfig, RossQwen2ForCausalLM)
+AutoConfig.register("univa_qwen2", UnivaConfig)
+AutoModelForCausalLM.register(UnivaConfig, UnivaQwen2ForCausalLM)

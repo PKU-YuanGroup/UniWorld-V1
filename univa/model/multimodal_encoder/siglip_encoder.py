@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 
-from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
+from transformers import SiglipVisionModel, SiglipImageProcessor, SiglipVisionConfig
+
 from transformers.models.clip import modeling_clip
 
 class CompiledCLIPMLP(modeling_clip.CLIPMLP):
@@ -23,15 +24,14 @@ class CompiledLayerNorm(nn.LayerNorm):
 modeling_clip.CLIPMLP = CompiledCLIPMLP
 modeling_clip.nn.LayerNorm = CompiledLayerNorm
 
-class CLIPVisionTower(nn.Module):
+class SiglipVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
         super().__init__()
 
         self.is_loaded = False
 
         self.vision_tower_name = vision_tower
-        self.select_layer = args.mm_vision_select_layer
-        self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
+        self.select_layer = -2
         self.mm_train_from_scratch = getattr(args, 'mm_train_from_scratch', False)
         self.unfreeze = getattr(args, 'unfreeze_mm_vision_tower', False)
 
@@ -39,57 +39,43 @@ class CLIPVisionTower(nn.Module):
         if not delay_load:
             self.load_model()
         else:
-            self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
+            self.cfg_only = SiglipVisionConfig.from_pretrained(self.vision_tower_name)
 
-    def load_model(self, device_map=None, pretrained=None):
+    def load_model(self, device_map=None):
         if self.is_loaded:
             print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
-
-        self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)       
+        
+        self.image_processor = SiglipImageProcessor.from_pretrained(self.vision_tower_name)
+        self.image_processor.crop_size = self.image_processor.size
         if self.mm_train_from_scratch:
-            config = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
-            self.vision_tower = CLIPVisionModel._from_config(config)
+            config = SiglipVisionConfig.from_pretrained(self.vision_tower_name)
+            self.vision_tower = SiglipVisionModel._from_config(config)
             print(f'[debug]\ttrain from scratch vision encoder')
         else:
-            self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+            self.vision_tower = SiglipVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
             print(f'[debug]\tload pretrained weight from {self.vision_tower_name}')
-        print(f'[debug]\tis training? {self.unfreeze}')
         assert not ((not self.unfreeze) and self.mm_train_from_scratch)
+        print(f'[debug]\tis training? {self.unfreeze}')
         self.vision_tower.requires_grad_(self.unfreeze)
-        print(f"[debug]\tself.vision_tower.requires_grad="
-              f"{self.vision_tower.vision_model.embeddings.patch_embedding.weight.requires_grad}")
-
-        if pretrained is not None:
-            print(f"=> loading pretrained mm_vision_tower from {self.pretrained} ...")
-            self.vision_tower.load_state_dict(torch.load(self.pretrained, map_location='cpu'))
 
         self.is_loaded = True
 
-    def feature_select(self, image_forward_outs, return_cls_token=False):
+    def feature_select(self, image_forward_outs):
         image_features = image_forward_outs.hidden_states[self.select_layer]
-        # if self.select_feature == 'patch':
-        #     image_features = image_features[:, 1:]
-        # elif self.select_feature == 'cls_patch':
-        #     image_features = image_features
-        # else:
-        #     raise ValueError(f'Unexpected select feature: {self.select_feature}')
-        if not return_cls_token:
-            assert self.select_feature == 'patch'
-            image_features = image_features[:, 1:]
-            
-        return image_features
 
+        return image_features
+    
     def inner_forward(self, images, return_cls_token=False):
         if type(images) is list:
             image_features = []
             for image in images:
                 image_forward_out = self.vision_tower(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
-                image_feature = self.feature_select(image_forward_out, return_cls_token).to(image.dtype)
+                image_feature = self.feature_select(image_forward_out).to(image.dtype)
                 image_features.append(image_feature)
         else:
             image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
-            image_features = self.feature_select(image_forward_outs, return_cls_token).to(images.dtype)
+            image_features = self.feature_select(image_forward_outs).to(images.dtype)
 
         return {'image_features': image_features}
 
@@ -145,15 +131,19 @@ class CLIPVisionTower(nn.Module):
     def mask_inner_forward(self, images, return_cls_token=False):
         if type(images) is list:
             image_features = []
+            masks = []
+            ids_restores = []
             for image in images:
                 image_forward_out, mask, ids_restore = self.forward_encoder(image.to(device=self.device, dtype=self.dtype).unsqueeze(0), output_hidden_states=True)
                 image_feature = self.feature_select(image_forward_out, return_cls_token).to(image.dtype)
                 image_features.append(image_feature)
+                masks.append(mask)
+                ids_restores.append(ids_restore)
         else:
-            image_forward_outs, mask, ids_restore = self.forward_encoder(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+            image_forward_outs, masks, ids_restores = self.forward_encoder(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
             image_features = self.feature_select(image_forward_outs, return_cls_token).to(images.dtype)
 
-        return {'image_features': image_features, 'mask': mask, 'ids_restore': ids_restore}
+        return {'image_features': image_features, 'masks': masks, 'ids_restores': ids_restores}
 
     def forward(self, images, return_cls_token=False):
         if self.unfreeze:

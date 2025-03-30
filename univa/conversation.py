@@ -202,30 +202,6 @@ conv_llava_plain = Conversation(
     sep="\n",
 )
 
-conv_llava_v1 = Conversation(
-    system="A chat between a curious human and an artificial intelligence assistant. "
-           "The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles=("USER", "ASSISTANT"),
-    version="v1",
-    messages=(),
-    offset=0,
-    sep_style=SeparatorStyle.TWO,
-    sep=" ",
-    sep2="</s>",
-)
-
-conv_qwen_2 = Conversation(
-    system="A chat between a curious human and an artificial intelligence assistant. "
-           "The assistant gives helpful, detailed, and polite answers to the human's questions.",
-    roles=("USER", "ASSISTANT"),
-    version="qwen_2",
-    messages=(),
-    offset=0,
-    sep_style=SeparatorStyle.TWO,
-    sep=" ",
-    sep2="<|im_end|>",
-)
-
 conv_qwen_chatml = Conversation(
     system="""<|im_start|>system
 You are a helpful assistant.""",
@@ -240,7 +216,6 @@ You are a helpful assistant.""",
 default_conversation = conv_vicuna_v1
 conv_templates = {
     "v1": conv_vicuna_v1,
-    "qwen_2": conv_qwen_2,  # from original ross
     "qwen_chatml": conv_qwen_chatml,  # from llava-next
     "plain": conv_llava_plain,
 }

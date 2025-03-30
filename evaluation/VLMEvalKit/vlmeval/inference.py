@@ -26,8 +26,8 @@ def infer_data_api(model, work_dir, model_name, dataset, index_set=None, api_npr
     if index_set is not None:
         data = data[data['index'].isin(index_set)]
 
-    if 'ross' in model_name.lower():
-        model = supported_VLM['ross'](model_name) if isinstance(model, str) else model
+    if 'univa' in model_name.lower():
+        model = supported_VLM['univa'](model_name) if isinstance(model, str) else model
     else:
         model = supported_VLM[model_name]() if isinstance(model, str) else model
     assert getattr(model, 'is_api', False)
@@ -99,8 +99,8 @@ def infer_data(model, model_name, work_dir, dataset, out_file, verbose=False, ap
     data = data[~data['index'].isin(res)]
     lt = len(data)
 
-    if 'ross' in model_name.lower():
-        model = supported_VLM['ross'](model_name) if isinstance(model, str) else model
+    if 'univa' in model_name.lower():
+        model = supported_VLM['univa'](model_name) if isinstance(model, str) else model
     else:
         model = supported_VLM[model_name]() if isinstance(model, str) else model
 

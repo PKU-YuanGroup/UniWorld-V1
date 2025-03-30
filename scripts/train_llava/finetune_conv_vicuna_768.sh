@@ -16,8 +16,8 @@ export NCCL_IB_RETRY_CNT=32
 export TOKENIZERS_PARALLELISM=false
 
 
-cd /storage/lb/ross
-conda activate ross_env
+cd /storage/lb/univa/FlowWorld
+conda activate univa
 JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
 IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
 LLM="/storage/lb/checkpoints/lmsys/vicuna-7b-v1.5"
