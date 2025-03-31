@@ -275,7 +275,6 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
         attention_mask = kwargs.pop("attention_mask", None)
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
-
         if images is not None:
             (
                 inputs,
@@ -299,7 +298,6 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
-
         return super().generate(
             position_ids=position_ids,
             attention_mask=attention_mask,

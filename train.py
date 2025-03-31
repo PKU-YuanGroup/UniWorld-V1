@@ -86,6 +86,9 @@ class ModelArguments:
     mm_vision_patch_size: Optional[int] = field(default=False) 
     mm_vision_resolution: Optional[int] = field(default=False) 
     mm_train_from_scratch: Optional[bool] = field(default=False)
+
+    # 
+    mm_use_im_start_end: bool = field(default=False)
     
 
     # eye adapter
@@ -425,6 +428,8 @@ def preprocess_multimodal(
                 if "mmtag" in conversation_lib.default_conversation.version:
                     sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
             replace_token = DEFAULT_IMAGE_TOKEN
+            if data_args.mm_use_im_start_end:
+                replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
             sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
     return sources
 
@@ -1095,8 +1100,12 @@ def train(attn_implementation="flash_attention_2"):
         if training_args.bits in [4, 8]:
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
+        model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
+        training_args.use_im_start_end = model_args.mm_use_im_start_end
+
         model.config.mm_projector_lr = training_args.mm_projector_lr
         model.config.mm_vision_tower_lr = training_args.mm_vision_tower_lr
+        model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
         model.config.pad_token_id = tokenizer.pad_token_id
 
         model.config.mm_inv_projector_lr = training_args.mm_inv_projector_lr

@@ -64,6 +64,9 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             ignore_mismatched_sizes=True,
             **kwargs
         )
+    mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
+    if mm_use_im_start_end:
+        tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
     model.resize_token_embeddings(len(tokenizer))
 
     vision_tower = model.get_vision_tower()

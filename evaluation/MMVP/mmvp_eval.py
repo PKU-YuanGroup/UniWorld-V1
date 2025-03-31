@@ -47,7 +47,10 @@ def process(line, args, tokenizer, image_processor, model_config, images):
     image_id = line["imageId"]
     input_image = images[image_id]
     if input_image is not None:
-        qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+        if getattr(model_config, 'mm_use_im_start_end', False):
+            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
+        else:
+            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
 
     conv = conv_templates[args.conv_mode].copy()
     conv.append_message(conv.roles[0], qs)

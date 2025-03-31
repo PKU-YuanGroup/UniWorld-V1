@@ -135,7 +135,10 @@ class UniVA(BaseModel):
             if msg['type'] == 'text':
                 content += msg['value']
             elif msg['type'] == 'image':
-                content += DEFAULT_IMAGE_TOKEN + '\n'
+                if getattr(self.model.config, 'mm_use_im_start_end', False):
+                    content += DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n'
+                else:
+                    content += DEFAULT_IMAGE_TOKEN + '\n'
                 images.append(msg['value'])
 
         images = [Image.open(s).convert('RGB') for s in images]

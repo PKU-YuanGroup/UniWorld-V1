@@ -154,8 +154,8 @@ conda activate univa
 cd /storage/lb/univa/FlowWorld/evaluation/MMVP
 
 HF_HOME="/storage/lb/logs/ross/mmvp_cache"
-MODEL_PATH="/storage/lb/logs/ross/llava-conv-vicuna-7b-pt558k-sft737k-newenv-768"
-CONV_MODE="v1"
+MODEL_PATH="/storage/lb/univa/FlowWorld/logs/ross/llava-conv-qwen2p5-3p0b-pt558k-sft737k-newenv-768-864/checkpoint-1000"
+CONV_MODE="qwen_chatml"
 HF_HOME=${HF_HOME} CUDA_VISIBLE_DEVICES=1 python mmvp_eval.py \
     --model_path ${MODEL_PATH} \
     --conv_mode ${CONV_MODE} \
