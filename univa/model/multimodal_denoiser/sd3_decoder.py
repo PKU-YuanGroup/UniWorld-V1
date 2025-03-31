@@ -36,17 +36,12 @@ class SD3DenoiseTower(nn.Module):
 
         self.is_loaded = True
 
-    def inner_forward(
-        self,
-        images: torch.Tensor,
-        encoder_hidden_states: torch.Tensor,
-    ):
-        bsz = len(images)
-
-        images = self.denoise_tower.image_processor.postprocess(images, output_type=output_type)
-        images = images.to(device=self.device, dtype=self.dtype)
-        latents = self.denoise_tower.vae.encode(latents, return_dict=False)
-        model_input = (latents / self.denoise_tower.vae.config.scaling_factor) + self.denoise_tower.vae.config.shift_factor
+    def inner_forward_batch(self, image, encoder_hidden_state):
+        bsz, _, height, width = image.shape
+        image = self.denoise_tower.image_processor.preprocess(image, height=height, width=width)
+        image = image.to(device=self.device, dtype=self.dtype)
+        latent = self.denoise_tower.vae.encode(image).latent_dist.sample()
+        model_input = (latent / self.denoise_tower.vae.config.scaling_factor) + self.denoise_tower.vae.config.shift_factor
 
         noise = torch.randn_like(model_input)
         target = noise - model_input
@@ -59,16 +54,28 @@ class SD3DenoiseTower(nn.Module):
             logit_std=1.0,
         ).to(device=self.device)
         timestep = sigmas.clone() * self.noise_scheduler.rescale  # rescale to [0, 1000.0)
-        while sigmas.ndim < latents.ndim:
+        while sigmas.ndim < latent.ndim:
             sigmas = sigmas.unsqueeze(-1)
 
-        noisy_model_input = self.noise_scheduler.add_noise(latents, sigmas, noise)
+        noisy_model_input = self.noise_scheduler.add_noise(latent, sigmas, noise)
         model_pred = self.denoise_tower.transformer(
             hidden_states=noisy_model_input, 
-            encoder_hidden_states=encoder_hidden_states, 
+            encoder_hidden_states=encoder_hidden_state, 
             timestep=timestep, 
-        ).to(images.dtype)
+        )
+        return model_pred, target
 
+    def inner_forward(
+        self,
+        images: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+    ):
+        bsz = len(images)
+        
+        if isinstance(images, list):
+            model_pred, target = tuple(zip(*[self.inner_forward_batch(self, images[i: i+1], encoder_hidden_states[i: i+1]) for i in range(bsz)]))
+        else:
+            model_pred, target = self.inner_forward_batch(self, images, encoder_hidden_states)
         return {'model_pred': model_pred, 'target': target}
 
     def forward(self, images):
@@ -83,10 +90,6 @@ class SD3DenoiseTower(nn.Module):
     @torch.no_grad()
     def sample(self, z, temperature=1.0, cfg=1.0):
         pass
-
-    @property
-    def dummy_feature(self):
-        return torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)
 
     @property
     def dtype(self):
