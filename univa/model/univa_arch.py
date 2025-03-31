@@ -175,6 +175,7 @@ class UnivaMetaModel:
                     denoise_tower = self.denoise_tower
                 denoise_tower.load_model()
 
+            self.config.mm_denoise_hidden_size = denoise_tower.hidden_size
             if getattr(self, 'mm_denoise_projector', None) is None:
                 self.mm_denoise_projector = build_denoise_projector(self.config)
             else:
