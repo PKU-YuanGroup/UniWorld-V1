@@ -18,13 +18,12 @@ export TOKENIZERS_PARALLELISM=false
 
 cd /storage/lb/univa/FlowWorld
 conda activate univa
-JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
-IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
+JSON_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA/train_json"
+IMAGE_FOLDER="/storage/lb/dataset/LanguageBind/MoE-LLaVA"
 LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-3B-Instruct"
 VISION_ENCODER="/storage/lb/checkpoints/ConvLLaVA/LAION-CLIP-ConvNeXt-Large-512"
-PRETRAIN_DIR="./logs/ross/llava-conv-qwen2p5-3p0b-pt558k-newenv-576-864"
-OUTPUT_DIR="./logs/ross/llava-conv-qwen2p5-3p0b-pt558k-sft737k-newenv-576-864"
-RUN_NAME="llava-conv-qwen2p5-3p0b-pt558k-sft737k-newenv-576-864"
+OUTPUT_DIR="./logs/ross/llava-conv-qwen2p5-3p0b-pt558k-newenv-768-864"
+RUN_NAME="llava-conv-qwen2p5-3p0b-pt558k-newenv-768-864"
 
 VISION_SIZE=320
 PROJ_PATCH_SIZE=1
@@ -40,19 +39,18 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 4 \
-    --learning_rate 2e-5 \
+    --per_device_train_batch_size 16 \
+    --gradient_accumulation_steps 2 \
+    --learning_rate 1e-3 \
     --warmup_ratio 0.03 \
     \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path ${LLM} \
-    --pretrain_mm_mlp_adapter ${PRETRAIN_DIR}/mm_projector.bin \
     --output_dir ${OUTPUT_DIR} \
     --vision_tower ${VISION_ENCODER} \
-    --version qwen_chatml \
+    --version plain \
     \
-    --data_path ${JSON_FOLDER}/Cambrian737k.json \
+    --data_path ${JSON_FOLDER}/llava_image_.json \
     --image_folder ${IMAGE_FOLDER} \
     \
     --mm_vision_resolution ${VISION_SIZE} \
@@ -61,13 +59,13 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --unfreeze_mm_vision_tower ${UNFREEZE} \
     --mm_vision_tower_lr ${VISION_LR} \
     \
+    --tune_mm_mlp_adapter True \
     --mm_vision_select_layer -2 \
     \
     --image_aspect_ratio anyres \
-    --mm_anyres_min_pixels $((576 * 576)) \
+    --mm_anyres_min_pixels $((768 * 768)) \
     --mm_anyres_max_pixels $((864 * 864)) \
     \
-    --group_by_modality_length True \
     --bf16 True \
     --num_train_epochs 1 \
     --per_device_eval_batch_size 4 \
@@ -75,9 +73,8 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --save_strategy "steps" \
     --save_steps 24000 \
     --save_total_limit 1 \
-    --save_only_model \
     --weight_decay 0. \
-    --lr_scheduler_type ${LR_SCHEDULER} \
+    --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
     --model_max_length 4096 \
@@ -85,4 +82,4 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --dataloader_num_workers 16 \
     --lazy_preprocess True \
     --report_to wandb \
-    --run_name ${RUN_NAME} >> logs/conv_any_ft.txt
+    --run_name ${RUN_NAME} >> ${OUTPUT_DIR}/log.txt

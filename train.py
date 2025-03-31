@@ -80,7 +80,6 @@ class ModelArguments:
 
     mm_projector_type: Optional[str] = field(default='linear')
     mm_inv_projector_type: Optional[str] = field(default='linear')    
-    mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
 
     # lb's project for convext encoder
@@ -881,7 +880,10 @@ class LazySupervisedDataset(Dataset):
         elif self.data_args.is_multimodal:
             # image does not exist in the data, but the model is multimodal
             crop_size = self.data_args.image_processor.crop_size
-            data_dict['image'] = [torch.zeros(3, crop_size['height'], crop_size['width']), (crop_size['height'], crop_size['width'])]
+            data_dict['image'] = [(
+                    torch.zeros(3, crop_size['height'], crop_size['width']), 
+                    torch.tensor([crop_size['height'], crop_size['width']])
+                )]
         return data_dict
 
 
@@ -919,7 +921,6 @@ class DataCollatorForSupervisedDataset(object):
             '''
             batch["image_sizes"] = [im[1] for im_list in images for im in im_list]
             images = [im[0] for im_list in images for im in im_list]
-
             if all(x is not None and x.shape == images[0].shape for x in images):
                 batch['images'] = torch.stack(images)
             else:

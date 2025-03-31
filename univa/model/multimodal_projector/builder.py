@@ -160,3 +160,23 @@ def build_mask_projector(config, delay_load=False, **kwargs):
     
 
     raise ValueError(f'Unknown projector type: {projector_type}')
+
+
+
+def build_denoise_projector(config, delay_load=False, **kwargs):
+    denoise_projector_type = getattr(config, 'mm_denoise_projector_type', 'linear')
+
+    if denoise_projector_type == 'linear':
+        return nn.Linear(config.hidden_size, config.mm_hidden_size)
+
+    if denoise_projector_type.startswith("mlp"):
+        mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', denoise_projector_type)
+        if mlp_gelu_match:
+            mlp_depth = int(mlp_gelu_match.group(1))
+            modules = [nn.RMSNorm(config.hidden_size), nn.Linear(config.hidden_size, config.mm_denoise_hidden_size)]
+            for _ in range(1, mlp_depth):
+                modules.append(nn.GELU())
+                modules.append(nn.Linear(config.mm_denoise_hidden_size, config.mm_denoise_hidden_size))
+            return nn.Sequential(*modules)
+
+    raise ValueError(f'Unknown projector type: {denoise_projector_type}')

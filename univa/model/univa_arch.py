@@ -30,6 +30,9 @@ from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_projector.builder import build_vision_projector, build_inv_projector, build_eye_projector, build_mask_projector
 from .pixel_decoder.builder import build_pixel_decoder
 
+from .multimodal_denoiser.builder import build_denoise_tower
+from .multimodal_projector.builder import build_denoise_projector
+
 from univa.constants import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
@@ -37,8 +40,6 @@ from univa.constants import (
     DEFAULT_IM_START_TOKEN,
     DEFAULT_IM_END_TOKEN,
 )
-
-from univa.mm_utils import get_anyres_image_grid_shape
 
 
 class UnivaMetaModel:
@@ -49,24 +50,28 @@ class UnivaMetaModel:
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=False)
             self.mm_projector = build_vision_projector(config)
-
-            if 'unpad' in getattr(config, 'mm_patch_merge_type', ''):
-                self.image_newline = nn.Parameter(
-                    torch.empty(config.hidden_size, dtype=self.dtype)
-                )
+            
+        if getattr(config, "mm_denoise_tower", None) is not None:
+            self.diffusion_tower = build_denoise_tower(config, delay_load=False)
+            self.mm_denoise_projector = build_denoise_projector(config)
 
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
+    
+    def get_denoise_tower(self):
+        denoise_tower = getattr(self, 'denoise_tower', None)
+        if type(denoise_tower) is list:
+            denoise_tower = denoise_tower[0]
+        return denoise_tower
 
     def initialize_vision_modules(self, model_args, fsdp=None):
         vision_tower = model_args.vision_tower
         mm_vision_select_layer = model_args.mm_vision_select_layer
         mm_vision_select_feature = model_args.mm_vision_select_feature
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
-        mm_patch_merge_type = model_args.mm_patch_merge_type
 
         self.config.mm_vision_tower = vision_tower
 
@@ -107,7 +112,8 @@ class UnivaMetaModel:
         self.config.mm_patch_size = self.vision_tower.patch_size()
 
         # for convnext
-        self.config.mm_vision_resolution = model_args.mm_vision_resolution
+        if 'conv' in model_args.vision_tower.lower():
+            self.config.mm_vision_resolution = model_args.mm_vision_resolution
         
         self.config.mm_anyres = model_args.mm_anyres
         self.config.mm_anyres_min_pixels = model_args.mm_anyres_min_pixels
@@ -131,16 +137,9 @@ class UnivaMetaModel:
         self.config.mm_hidden_size = vision_tower.hidden_size
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
-        self.config.mm_patch_merge_type = mm_patch_merge_type
 
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
-
-            if 'unpad' in mm_patch_merge_type:
-                embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
-                self.image_newline = nn.Parameter(
-                    torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std
-                )
         else:
             # In case it is frozen by LoRA
             for p in self.mm_projector.parameters():
@@ -154,6 +153,43 @@ class UnivaMetaModel:
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
+
+
+        denoise_tower = getattr(model_args, "denoise_tower", None)
+        if denoise_tower is not None:
+            self.config.mm_denoise_tower = denoise_tower
+            pretrain_mm_denoise_mlp_adapter = model_args.pretrain_mm_denoise_mlp_adapter
+
+        if denoise_tower is not None:
+            if self.get_denoise_tower() is None:
+                denoise_tower = build_denoise_tower(model_args)
+
+                if fsdp is not None and len(fsdp) > 0:
+                    self.denoise_tower = [denoise_tower]
+                else:
+                    self.denoise_tower = denoise_tower
+            else:
+                if fsdp is not None and len(fsdp) > 0:
+                    denoise_tower = self.denoise_tower[0]
+                else:
+                    denoise_tower = self.denoise_tower
+                denoise_tower.load_model()
+
+            if getattr(self, 'mm_denoise_projector', None) is None:
+                self.mm_denoise_projector = build_denoise_projector(self.config)
+            else:
+                # In case it is frozen by LoRA
+                for p in self.mm_denoise_projector.parameters():
+                    p.requires_grad = True
+
+            if pretrain_mm_denoise_mlp_adapter is not None:
+                print(f"=> loading pretrain_mm_denoise_mlp_adapter from {pretrain_mm_denoise_mlp_adapter} ...")
+                mm_denoise_projector_weights = torch.load(pretrain_mm_denoise_mlp_adapter, map_location='cpu')
+
+                def get_w(weights, keyword):
+                    return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
+
+                self.mm_denoise_projector.load_state_dict(get_w(mm_denoise_projector_weights, 'mm_denoise_projector'))
 
 
         self.config.eye_enable = False
@@ -280,6 +316,9 @@ class UnivaMetaForCausalLM(ABC):
 
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
+    
+    def get_denoise_tower(self):
+        return self.get_model().get_denoise_tower()
 
     def encode_images(self, images):
         encoder_out = self.get_model().get_vision_tower()(images, return_cls_token=False)
@@ -289,6 +328,11 @@ class UnivaMetaForCausalLM(ABC):
         else:
             image_features = self.get_model().mm_projector(image_features)
         return image_features, encoder_out
+
+    def decode_images(self, conditions):
+        conditions = self.get_model().mm_denoise_projector(conditions)
+        images = self.get_model().get_denoise_tower()(conditions)
+        return images
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,

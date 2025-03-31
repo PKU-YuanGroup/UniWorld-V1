@@ -3,25 +3,6 @@ import torch.nn as nn
 import math
 from transformers import ConvNextModel, CLIPImageProcessor, ConvNextConfig
 
-# class CompiledCLIPMLP(modeling_clip.CLIPMLP):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-
-#     @torch.compile
-#     def forward(self, *args, **kwargs):
-#         return super().forward(*args, **kwargs)
-    
-# class CompiledLayerNorm(nn.LayerNorm):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-
-#     @torch.compile
-#     def forward(self, *args, **kwargs):
-#         return super().forward(*args, **kwargs)
-    
-# modeling_clip.CLIPMLP = CompiledCLIPMLP
-# modeling_clip.nn.LayerNorm = CompiledLayerNorm
-
 class ConvNeXtCLIPVisionTower(nn.Module):
     def __init__(self, vision_tower, args, delay_load=False):
         super().__init__()
