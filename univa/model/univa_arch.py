@@ -392,7 +392,6 @@ class UnivaMetaForCausalLM(ABC):
                 eoi_ids[batch_idx].append(image_position[i] + image_features[cur_image_idx+i].shape[0] - 1)
 
             image_token_indices = [-1] + image_position + [cur_input_ids.shape[0]]
-
             cur_input_ids_noim = []
             cur_labels = labels[batch_idx]
             cur_labels_noim = []
@@ -489,7 +488,7 @@ class UnivaMetaForCausalLM(ABC):
         if model_args.mm_use_im_start_end:
             num_new_tokens = tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))
-
+            self.config.im_start_token, self.config.im_end_token = tokenizer.convert_tokens_to_ids([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN])
             if num_new_tokens > 0:
                 input_embeddings = self.get_input_embeddings().weight.data
                 output_embeddings = self.get_output_embeddings().weight.data

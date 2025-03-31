@@ -61,9 +61,9 @@ class CompiledQwen2RotaryEmbedding(modeling_qwen2.Qwen2RotaryEmbedding):
     def forward(self, *args, **kwargs):
         return super().forward(*args, **kwargs)
     
-modeling_qwen2.Qwen2MLP = CompiledQwen2MLP
-modeling_qwen2.Qwen2RMSNorm = CompiledQwen2RMSNorm
-modeling_qwen2.Qwen2RotaryEmbedding = CompiledQwen2RotaryEmbedding
+# modeling_qwen2.Qwen2MLP = CompiledQwen2MLP
+# modeling_qwen2.Qwen2RMSNorm = CompiledQwen2RMSNorm
+# modeling_qwen2.Qwen2RotaryEmbedding = CompiledQwen2RotaryEmbedding
 
 
 class UnivaConfig(Qwen2Config):

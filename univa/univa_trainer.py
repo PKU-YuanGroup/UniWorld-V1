@@ -282,6 +282,8 @@ class UniVATrainer(Trainer):
 
             # Only save Adapter
             keys_to_match = ['mm_projector']
+            if getattr(self.args, "mm_use_im_start_end", False):
+                keys_to_match.extend(['embed_tokens', 'embed_in'])
             weight_to_save = get_mm_adapter_state_maybe_zero_3(self.model.named_parameters(), keys_to_match)
             if self.args.local_rank == 0 or self.args.local_rank == -1:
                 self.model.config.save_pretrained(output_dir)

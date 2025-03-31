@@ -242,6 +242,8 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
     if getattr(trainer.args, "tune_mm_mlp_adapter", False):
         # Only save Adapter
         keys_to_match = ['mm_projector']
+        if getattr(trainer.args, "mm_use_im_start_end", False):
+            keys_to_match.extend(['embed_tokens', 'embed_in'])
         weight_mm_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
 
         # if getattr(trainer.args, "mm_pixel_decoder", False):
@@ -542,6 +544,7 @@ def preprocess_v1(
 def preprocess_plain(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
+    mm_use_im_start_end = False, 
 ) -> Dict:
     # add end signal and concatenate together
     conversations = []
@@ -551,7 +554,10 @@ def preprocess_plain(
         if DEFAULT_IMAGE_TOKEN in source[0]['value']:
             # comprehension data
             comprehension = True
-            source[0]['value'] = DEFAULT_IMAGE_TOKEN
+            if mm_use_im_start_end:
+                source[0]['value'] = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+            else:
+                source[0]['value'] = DEFAULT_IMAGE_TOKEN
             conversation = source[0]['value'] + source[1]['value'] + conversation_lib.default_conversation.sep
         assert comprehension or creation
         assert (not comprehension) or (not creation)
@@ -748,7 +754,8 @@ def preprocess_qwen_chatml(sources, tokenizer: transformers.PreTrainedTokenizer,
 def preprocess(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+    has_image: bool = False, 
+    mm_use_im_start_end: bool = False, 
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -758,7 +765,7 @@ def preprocess(
     4. Make a deepcopy as the target. Mask human words with IGNORE_INDEX.
     """
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.PLAIN:
-        return preprocess_plain(sources, tokenizer)
+        return preprocess_plain(sources, tokenizer, mm_use_im_start_end=mm_use_im_start_end)
     if conversation_lib.default_conversation.version.startswith("v1"):
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "qwen_chatml":
@@ -805,7 +812,7 @@ class LazySupervisedDataset(Dataset):
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
-        self.list_data_dict = list_data_dict
+        self.list_data_dict = list_data_dict[:200]
         self.data_args = data_args
 
     def __len__(self):
@@ -874,7 +881,9 @@ class LazySupervisedDataset(Dataset):
         data_dict = preprocess(
             sources,
             self.tokenizer,
-            has_image=('image' in self.list_data_dict[i]))
+            has_image=('image' in self.list_data_dict[i]), 
+            mm_use_im_start_end=self.data_args.mm_use_im_start_end
+            )
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])
@@ -1101,7 +1110,7 @@ def train(attn_implementation="flash_attention_2"):
             model.get_model().mm_projector.to(dtype=compute_dtype, device=training_args.device)
 
         model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-        training_args.use_im_start_end = model_args.mm_use_im_start_end
+        training_args.mm_use_im_start_end = model_args.mm_use_im_start_end
 
         model.config.mm_projector_lr = training_args.mm_projector_lr
         model.config.mm_vision_tower_lr = training_args.mm_vision_tower_lr
