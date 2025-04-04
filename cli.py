@@ -13,7 +13,7 @@ import requests
 from PIL import Image
 from io import BytesIO
 from transformers import TextStreamer
-
+from transformers.cache_utils import DynamicCache
 
 def load_image(image_file):
     if image_file.startswith('http://') or image_file.startswith('https://'):
@@ -39,7 +39,7 @@ def main(args):
     roles = conv.roles
 
     image = load_image(args.image_file)
-    image_size = image.size
+    image_w, image_h = image.size
     # Similar operation in model_worker.py
     image_tensor = process_images([image], image_processor, model.config)
     if type(image_tensor) is list:
@@ -72,7 +72,7 @@ def main(args):
 
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(model.device)
         # print('prompt', prompt)
-        # print('input_ids', input_ids)
+        print('input_ids', input_ids.shape, input_ids)
         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
         keywords = [stop_str]
         streamer = TextStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
@@ -81,7 +81,7 @@ def main(args):
             output_ids = model.generate(
                 input_ids,
                 images=image_tensor,
-                image_sizes=[image_size],
+                image_sizes=[[image_h, image_w]],
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 max_new_tokens=args.max_new_tokens,
@@ -107,6 +107,10 @@ if __name__ == "__main__":
     parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
-    args.model_path = "/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403"
-    args.image_file = "/mnt/data/lb/Open-Sora-Plan/256x256_cfg7.0_t2i_umt5_ema/OpenSoraFlowMatchEuler_22_gs7.0_s100.jpg"
+    args.model_path = "/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft"
+    args.image_file = "/mnt/data/datasets/LLaVA/llava_image_tune/coco/train2017/000000033471.jpg"
     main(args)
+
+    '''
+    CUDA_VISIBLE_DEVICES=0 python cli.py
+    '''

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-
+from copy import deepcopy
+from PIL import Image
 from diffusers import StableDiffusion3Pipeline
 from .scheduler import OpenSoraPlanFlowMatchEulerScheduler
 
@@ -17,27 +18,34 @@ class SD3DenoiseTower(nn.Module):
         if not delay_load:
             self.load_model()
 
+        self.is_build_pipeline = False
+
     def load_model(self, device_map=None, pretrained=None):
         if self.is_loaded:
             print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
 
-        denoise_tower = StableDiffusion3Pipeline.from_pretrained(self.denoise_tower_name, device_map=device_map)
+        pipeline = StableDiffusion3Pipeline.from_pretrained(self.denoise_tower_name, device_map=device_map)
+
+        # 1 1 dim
+        self.register_buffer(
+            "pooled_prompt_embeds", 
+            self._get_pooled_prompt_embeds(
+                pipeline.text_encoder, pipeline.tokenizer, pipeline.text_encoder_2, pipeline.tokenizer_2, prompt=''
+                )
+            )  
+        
+        
         print(f'[debug]\tload pretrained weight from {self.denoise_tower_name}')
         print(f'[debug]\tis training? {self.unfreeze}')
-        self.transformer = denoise_tower.transformer
-        self.vae = denoise_tower.vae
-        self.text_encoder = denoise_tower.text_encoder
-        self.text_encoder_2 = denoise_tower.text_encoder_2
-        self.tokenizer = denoise_tower.tokenizer
-        self.tokenizer_2 = denoise_tower.tokenizer_2
+        self.transformer = deepcopy(pipeline.transformer)
+        self.vae = deepcopy(pipeline.vae)
 
         self.transformer.requires_grad_(self.unfreeze)
         self.vae.requires_grad_(False)
-        self.text_encoder.requires_grad_(False)
-        self.text_encoder_2.requires_grad_(False)
-        del denoise_tower.text_encoder_3
-        del denoise_tower.tokenizer_3
+
+        del pipeline
+
         print(f"[debug]\tself.denoise_tower.requires_grad="
               f"{self.transformer.pos_embed.proj.weight.requires_grad}")
 
@@ -47,24 +55,54 @@ class SD3DenoiseTower(nn.Module):
 
         self.is_loaded = True
 
-    def _encode_prompt_with_clip(self, text_encoder, tokenizer, prompt, device, batch_size):
-        if prompt == '':
-            max_length = 2  # begin token + 1
-        else:
-            max_length = 77
+    def build_pipeline(self, dtype=torch.float16, device_map=None):
+        pipeline = StableDiffusion3Pipeline.from_pretrained(self.denoise_tower_name, device_map=device_map)
+        self.pipeline = pipeline
+        self.pipeline.vae = self.vae
+        self.pipeline.transformer = self.transformer
+        self.is_build_pipeline = True
+        self.pipeline.text_encoder.to(dtype)
+        self.pipeline.text_encoder_2.to(dtype)
+        self.pipeline.text_encoder_3.to(dtype)
+
+    def _get_t5_prompt_embeds(self, text_encoder, tokenizer, max_sequence_length, prompt=''):
         prompt = [prompt] if isinstance(prompt, str) else prompt
         text_inputs = tokenizer(
             prompt,
             padding="max_length",
-            max_length=max_length,
+            max_length=max_sequence_length,
+            truncation=True,
+            add_special_tokens=True,
+            return_tensors="pt",
+        )
+        prompt_embeds = text_encoder(text_inputs.input_ids.to(text_encoder.device))[0]
+
+        return prompt_embeds
+
+
+    def _encode_prompt_with_clip(self, text_encoder, tokenizer, prompt=''):
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        text_inputs = tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=77,
             truncation=True,
             return_tensors="pt",
         )
-        prompt_embeds = text_encoder(text_inputs.input_ids.to(device), output_hidden_states=True)
+        prompt_embeds = text_encoder(text_inputs.input_ids, output_hidden_states=True)
         pooled_prompt_embeds = prompt_embeds[0]
-        pooled_prompt_embeds = pooled_prompt_embeds.repeat(batch_size, 1)
         return pooled_prompt_embeds
 
+    def _get_pooled_prompt_embeds(self, text_encoder, tokenizer, text_encoder_2, tokenizer_2, prompt=''):
+        pooled_prompt_embeds = self._encode_prompt_with_clip(
+            text_encoder, tokenizer, prompt=prompt
+            )
+        pooled_prompt_embeds_2 = self._encode_prompt_with_clip(
+            text_encoder_2, tokenizer_2, prompt=prompt
+            )
+        pooled_prompt_embeds = torch.cat([pooled_prompt_embeds, pooled_prompt_embeds_2], dim=-1)
+        return pooled_prompt_embeds
+    
     def inner_forward_batch(self, image, encoder_hidden_state):
         bsz, _, height, width = image.shape
         image = ((image / 255.0) - 0.5) / 0.5
@@ -86,13 +124,7 @@ class SD3DenoiseTower(nn.Module):
             sigmas = sigmas.unsqueeze(-1)
 
         noisy_model_input = self.noise_scheduler.add_noise(latent, sigmas, noise)
-        pooled_prompt_embeds = self._encode_prompt_with_clip(
-            self.text_encoder, self.tokenizer, prompt='', device=self.device, batch_size=bsz
-            )
-        pooled_prompt_embeds_2 = self._encode_prompt_with_clip(
-            self.text_encoder_2, self.tokenizer_2, prompt='', device=self.device, batch_size=bsz
-            )
-        pooled_prompt_embeds = torch.cat([pooled_prompt_embeds, pooled_prompt_embeds_2], dim=-1)
+        pooled_prompt_embeds = self.pooled_prompt_embeds.repeat(bsz, 1)
         model_pred = self.transformer(
             hidden_states=noisy_model_input, 
             encoder_hidden_states=encoder_hidden_state, 
@@ -128,8 +160,37 @@ class SD3DenoiseTower(nn.Module):
                 return denoiser_output
 
     @torch.no_grad()
-    def sample(self, z, temperature=1.0, cfg=1.0):
-        pass
+    def sample(
+        self, 
+        image_size, 
+        prompt_embeds, 
+        num_inference_steps=28, 
+        guidance_scale=1.0, 
+        output_type='pil', 
+        **kwargs, 
+        ):
+        pooled_prompt_embeds = self.pooled_prompt_embeds
+        negative_pooled_prompt_embeds = self.pooled_prompt_embeds
+        negative_prompt_embeds = self._get_t5_prompt_embeds(
+            self.pipeline.text_encoder_3, self.pipeline.tokenizer_3, prompt_embeds.shape[1]
+            )
+        assert negative_prompt_embeds.shape[1] >= prompt_embeds.shape[1], \
+            f"negative_prompt_embeds.shape ({negative_prompt_embeds.shape}) vs prompt_embeds.shape ({prompt_embeds.shape})"
+        negative_prompt_embeds = negative_prompt_embeds[:, :prompt_embeds.shape[1]]
+        images = self.pipeline(        
+            height=image_size[0],
+            width=image_size[1],
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds, 
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds, 
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            output_type=output_type, 
+            **kwargs, 
+        ).images[0]
+        images.save('tmp.jpg')
+        return images
 
     @property
     def dtype(self):

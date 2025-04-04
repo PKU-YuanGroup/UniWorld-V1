@@ -40,6 +40,7 @@ from univa.constants import (
     DEFAULT_IM_START_TOKEN,
     DEFAULT_IM_END_TOKEN,
 )
+from univa.mm_utils import process_images
 
 
 class UnivaMetaModel:
@@ -50,9 +51,8 @@ class UnivaMetaModel:
         if hasattr(config, "mm_vision_tower"):
             self.vision_tower = build_vision_tower(config, delay_load=False)
             self.mm_projector = build_vision_projector(config)
-            
         if getattr(config, "mm_denoise_tower", None) is not None:
-            self.diffusion_tower = build_denoise_tower(config, delay_load=False)
+            self.denoise_tower = build_denoise_tower(config, delay_load=False)
             self.mm_denoise_projector = build_denoise_projector(config)
 
     def get_vision_tower(self):
@@ -344,7 +344,22 @@ class UnivaMetaForCausalLM(ABC):
             conditions = self.get_model().mm_denoise_projector(conditions)
         denoiser_output = self.get_model().get_denoise_tower()(images, conditions)
         return denoiser_output
-
+    
+    def sample_images(self, image_size, conditions, **kwargs):
+        if isinstance(conditions, list):
+            conditions = [self.get_model().mm_denoise_projector(i) for i in conditions]
+        else:
+            conditions = self.get_model().mm_denoise_projector(conditions)
+        images = self.get_model().get_denoise_tower().sample(image_size, conditions, **kwargs)
+        return images
+    
+    def sample_and_process_images(self, image_size, conditions, **kwargs):
+        images = self.sample_images(image_size, conditions, **kwargs)
+        (gen_w, gen_h) = images.size
+        assert gen_h == image_size[0] and gen_w == image_size[1]
+        images = process_images([images], self.get_vision_tower().image_processor, self.config)
+        return images
+    
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
         images, image_sizes=None, cache_position=None,
@@ -352,7 +367,7 @@ class UnivaMetaForCausalLM(ABC):
     ):  
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None:
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, cache_position, None
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, cache_position, None, image_sizes
         # there is no gen_task if is_tensor(images)
         images_unwrap = [im for im_list in images for im in im_list]
         if all(x is not None and x.shape == images_unwrap[0].shape for x in images_unwrap):
@@ -405,8 +420,6 @@ class UnivaMetaForCausalLM(ABC):
             # <boi>  <img_token> * N  <eoi>
             #   |                       |
             # boi_ids - 1            eoi_ids + 1
-            print('image_position', image_position)
-            print(num_images, len(image_features))
             for i in range(num_images):
                 if i == 0:
                     boi_ids[batch_idx].append(image_position[i])
@@ -447,16 +460,18 @@ class UnivaMetaForCausalLM(ABC):
 
             cur_is_gen_task = task_types is not None and task_types[batch_idx] == 'gen'
             if cur_is_gen_task:
-                # need predict <im_start> and <im_end>
+                # only need predict <im_start>
                 # <gen_image> is the last <image>
                 # <boi>  <img_token> * N  <eoi>
                 #   |                       |
                 # boi_ids - 1            eoi_ids + 1
+                # import ipdb;ipdb.set_trace()
                 cur_new_labels[boi_ids[batch_idx][-1] - 1] = self.config.im_start_token
-                cur_new_labels[eoi_ids[batch_idx][-1] + 1] = self.config.im_end_token
+                # cur_new_labels[eoi_ids[batch_idx][-1] + 1] = self.config.im_end_token
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
+        # import ipdb;ipdb.set_trace()
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
         if tokenizer_model_max_length is not None:
@@ -516,7 +531,7 @@ class UnivaMetaForCausalLM(ABC):
         cache_position = None if (_attention_mask is None or cache_position is None) else torch.arange(
             attention_mask.shape[1], device=attention_mask.device)
 
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, boi_ids, eoi_ids, cache_position, encoder_out
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels, boi_ids, eoi_ids, cache_position, encoder_out, image_sizes
     
     def initialize_vision_tokenizer(self, model_args, tokenizer):
         if model_args.mm_use_im_start_end:

@@ -773,7 +773,6 @@ def preprocess_qwen_chatml(
                 target += [IGNORE_INDEX] * len(encode_id)
             else:
                 target += encode_id
-        
 
         if mm_use_im_start_end:
             mask_tokens_ids = [tokenizer(DEFAULT_IM_START_TOKEN).input_ids[0], tokenizer(DEFAULT_IM_END_TOKEN).input_ids[0]]

@@ -35,6 +35,7 @@ from transformers.generation.utils import GenerateOutput
 from ..univa_arch import UnivaMetaModel, UnivaMetaForCausalLM, CausalLMOutputWithPastWithVM
 
 from transformers.models.qwen2 import modeling_qwen2
+from univa.constants import IMAGE_TOKEN_INDEX
 
 class CompiledQwen2MLP(modeling_qwen2.Qwen2MLP):
     def __init__(self, *args, **kwargs):
@@ -113,6 +114,8 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if inputs_embeds is None:
+            # print('\n\nforward prepare_inputs_labels_for_multimodal exec 1')
+            # if kwargs['sample_gen']
             (
                 input_ids,
                 position_ids,
@@ -124,6 +127,7 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
                 eoi_ids,
                 cache_position,
                 encoder_out, 
+                image_sizes, 
             ) = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
                 position_ids,
@@ -136,6 +140,7 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
                 task_types, 
             )
         else:
+            print('\n\nforward exec 1\n\n')
             boi_ids, eoi_ids, encoder_out = None, None, None
         
         return self.inner_forward(
@@ -231,8 +236,7 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
         logits = logits.float()
-
-
+        
         loss, lm_loss = None, None
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
@@ -297,11 +301,16 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
         image_sizes: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
+        print(f'before image_sizes, {image_sizes}')
+        if not isinstance(image_sizes[0][0], list):
+            image_sizes = [[i] for i in image_sizes]
+        print(f'after image_sizes, {image_sizes}')
         position_ids = kwargs.pop("position_ids", None)
         attention_mask = kwargs.pop("attention_mask", None)
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
         if images is not None:
+            print('\n\ngenerate prepare_inputs_labels_for_multimodal exec 1\n\n')
             (
                 inputs,
                 position_ids,
@@ -313,6 +322,7 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
                 eoi_ids,
                 cache_positions,
                 encoder_out, 
+                image_sizes, 
             ) = self.prepare_inputs_labels_for_multimodal(
                 inputs,
                 position_ids,
@@ -323,12 +333,14 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
                 image_sizes=image_sizes,
             )
         else:
+            print('generate embed_tokens exec 1')
             inputs_embeds = self.get_model().embed_tokens(inputs)
-        print('generate exec 1')
+        print('\n\ngenerate exec 1\n\n')
         return super().generate(
             position_ids=position_ids,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
+            image_sizes=image_sizes, 
             **kwargs
         )
 
@@ -342,15 +354,18 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
     ):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
-        print('\n\nbefore prepare_inputs_for_generation')
+
+        print('before prepare_inputs_for_generation')
         print(
-            'input_ids', input_ids, 
-            '\npast_key_values', len(past_key_values.key_cache), past_key_values.key_cache[0].shape if len(past_key_values.key_cache) > 0 else [], 
-            '\ninputs_embeds', inputs_embeds.shape if inputs_embeds is not None else 'None', 
-            '\ncache_position', kwargs['cache_position'].shape, 
-            '\nposition_ids', kwargs['position_ids'].shape if kwargs['position_ids'] is not None else 'None', 
-            '\nattention_mask', attention_mask.shape, 
-            '\nuse_cache', kwargs['use_cache'], 
+            '\tinput_ids', input_ids, 
+            '\n\tpast_key_values', len(past_key_values.key_cache), past_key_values.key_cache[0].shape if len(past_key_values.key_cache) > 0 else [], 
+            '\n\tinputs_embeds', inputs_embeds.shape if inputs_embeds is not None else 'None', 
+            '\n\tcache_position', (kwargs['cache_position'].shape, kwargs['cache_position'][-1]) if kwargs['cache_position'] is not None else 'None', 
+            '\n\tposition_ids', (kwargs['position_ids'].shape, kwargs['position_ids'][-1][-1]) if kwargs['position_ids'] is not None else 'None', 
+            '\n\tattention_mask', attention_mask.shape, attention_mask[-1][-1], 
+            '\n\tuse_cache', kwargs['use_cache'], 
+            '\n\timages', images.shape if images is not None else 'None', 
+            '\n\timage_sizes', image_sizes if image_sizes is not None else 'None', 
             )
         # import ipdb;ipdb.set_trace()
         _inputs = super().prepare_inputs_for_generation(
@@ -359,19 +374,39 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
         )
         print('after prepare_inputs_for_generation')
         print(
-            'input_ids', _inputs['input_ids'], 
-            '\npast_key_values', len(_inputs['past_key_values'].key_cache), _inputs['past_key_values'].key_cache[0].shape if len(_inputs['past_key_values'].key_cache) > 0 else 'None', 
-            '\ninputs_embeds', _inputs['inputs_embeds'].shape if _inputs['inputs_embeds'] is not None else 'None', 
-            '\ncache_position', _inputs['cache_position'].shape, 
-            '\nposition_ids', _inputs['position_ids'].shape if _inputs['position_ids'] is not None else 'None', 
-            '\nattention_mask', _inputs['attention_mask'].shape, 
-            '\nuse_cache', _inputs['use_cache'], 
+            '\tinput_ids', _inputs['input_ids'], 
+            '\n\tpast_key_values', len(_inputs['past_key_values'].key_cache), _inputs['past_key_values'].key_cache[0].shape if len(_inputs['past_key_values'].key_cache) > 0 else 'None', 
+            '\n\tinputs_embeds', _inputs['inputs_embeds'].shape if _inputs['inputs_embeds'] is not None else 'None', 
+            '\n\tcache_position', (_inputs['cache_position'].shape, _inputs['cache_position'][-1]) if _inputs['cache_position'] is not None else 'None', 
+            '\n\tposition_ids', (_inputs['position_ids'].shape, _inputs['position_ids'][-1][-1]) if _inputs['position_ids'] is not None else 'None', 
+            '\n\tattention_mask', _inputs['attention_mask'].shape, attention_mask[-1][-1], 
+            '\n\tuse_cache', _inputs['use_cache'], 
             )
-        # import ipdb;ipdb.set_trace()
-        if images is not None:
+        if input_ids.numel() > 0 and input_ids[-1][-1] == self.config.im_start_token:
+            assert input_ids.shape[0] == 1
+            assert image_sizes is not None
+            # generate image
+            images = self.sample_and_process_images(image_sizes[-1][-1], inputs_embeds).to(inputs_embeds.dtype)
             _inputs['images'] = images
-        if image_sizes is not None:
             _inputs['image_sizes'] = image_sizes
+            input_ids = torch.cat(
+                [input_ids, torch.LongTensor([[IMAGE_TOKEN_INDEX, self.config.im_end_token]]).to(self.device)], 
+                dim=1, 
+                )
+            attention_mask = torch.cat(
+                [attention_mask, torch.ones((1, images.shape[1]), device=self.device)], 
+                dim=1, 
+                )
+            _inputs['input_ids'] = input_ids
+            _inputs['attention_mask'] = attention_mask
+            # input_ids = torch.cat(
+            #     [input_ids, torch.LongTensor([[IMAGE_TOKEN_INDEX, self.config.im_end_token]])], device=self.device
+            #     )
+        else:
+            if images is not None:
+                _inputs['images'] = images
+            if image_sizes is not None:
+                _inputs['image_sizes'] = image_sizes
         return _inputs
 
 

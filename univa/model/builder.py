@@ -89,4 +89,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     else:
         context_len = 4096
 
+    if model.get_denoise_tower() is not None and not model.get_denoise_tower().is_build_pipeline:
+        model.get_denoise_tower().build_pipeline(dtype=torch.float16)
+        model.get_denoise_tower().pipeline.to('cuda')
+
     return tokenizer, model, image_processor, context_len
