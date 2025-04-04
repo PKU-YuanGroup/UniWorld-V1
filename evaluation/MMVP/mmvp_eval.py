@@ -51,6 +51,7 @@ def process(line, args, tokenizer, image_processor, model_config, images):
             qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
         else:
             qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+        print(qs)
 
     conv = conv_templates[args.conv_mode].copy()
     conv.append_message(conv.roles[0], qs)
@@ -95,12 +96,12 @@ def eval_model(args):
     for i in tqdm(range(300)):
         # file_path = hf_hub_download(repo_id="MMVP/MMVP", filename=f"{i + 1}.jpg", subfolder="MMVP Images",
         #                             repo_type="dataset")
-        file_path = f'/storage/lb/logs/ross/mmvp_cache/hub/datasets--MMVP--MMVP/snapshots/37eafecab8a3940c50c2ade5b36de69dbc99a8cf/MMVP Images/{i + 1}.jpg'
+        file_path = f'/mnt/data/lb/datasets/mmvp_cache/hub/datasets--MMVP--MMVP/snapshots/37eafecab8a3940c50c2ade5b36de69dbc99a8cf/MMVP Images/{i + 1}.jpg'
         images[i] = Image.open(file_path).convert('RGB')
 
     questions = []
     # file_path = hf_hub_download(repo_id="MMVP/MMVP", filename="Questions.csv", repo_type="dataset")
-    file_path = "/storage/lb/logs/ross/mmvp_cache/hub/datasets--MMVP--MMVP/snapshots/37eafecab8a3940c50c2ade5b36de69dbc99a8cf/Questions.csv"
+    file_path = "/mnt/data/lb/datasets/mmvp_cache/hub/datasets--MMVP--MMVP/snapshots/37eafecab8a3940c50c2ade5b36de69dbc99a8cf/Questions.csv"
     with open(file_path, 'r') as file:
         reader = csv.reader(file)
         for row in reader:

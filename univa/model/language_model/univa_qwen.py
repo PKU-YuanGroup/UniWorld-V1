@@ -108,6 +108,8 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
         image_sizes: Optional[List[List[int]]] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        task_types: Optional[List[str]] = None,
+        images_wo_scale_norm: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if inputs_embeds is None:
@@ -131,6 +133,7 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
                 images,
                 image_sizes,
                 cache_position,
+                task_types, 
             )
         else:
             boi_ids, eoi_ids, encoder_out = None, None, None
@@ -151,6 +154,8 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
             images=images,
             cache_position=cache_position,
             encoder_out=encoder_out, 
+            task_types=task_types, 
+            images_wo_scale_norm=images_wo_scale_norm, 
             **kwargs,
         )
 
@@ -171,6 +176,8 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
         images: Optional[torch.FloatTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         encoder_out: Optional[torch.LongTensor] = None,
+        task_types: Optional[List[str]] = None,
+        images_wo_scale_norm: Optional[torch.FloatTensor] = None,
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         # mostly obtained from https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2/modeling_qwen2.py
@@ -238,14 +245,32 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
 
         eye_loss = None
         if self.training and getattr(self.config, 'eye_enable', False):
-            eye_loss = self.compute_eye_loss(outputs.hidden_states, labels, **kwargs)
+            eye_loss = self.compute_eye_loss(hidden_states, labels, **kwargs)
             loss = loss + eye_loss * self.config.mm_eye_weight
 
         mask_loss = None
         if self.training and getattr(self.config, 'mask_enable', False):
             mask, ids_restore = encoder_out.pop('mask'), encoder_out.pop('ids_restore')
-            mask_loss = self.compute_mask_loss(images, outputs.hidden_states, mask, ids_restore, boi_ids, eoi_ids)
+            mask_loss = self.compute_mask_loss(images, hidden_states, mask, ids_restore, boi_ids, eoi_ids)
             loss = loss + mask_loss * self.config.mm_mask_weight
+
+        denoise_loss = None
+        if self.training and getattr(self.config, 'denoise_enable', False):
+            batch_gen_idx = [i for i, task_type in enumerate(task_types) if task_type == 'gen']
+            if len(batch_gen_idx) > 0:
+                batch_gen_images = [images_wo_scale_norm[i] for i in batch_gen_idx]
+                batch_gen_conditions = [hidden_states[i] for i in batch_gen_idx]
+                batch_gen_boi_ids = [boi_ids[i] for i in batch_gen_idx]
+                denoise_loss = self.compute_denoise_loss(batch_gen_images, batch_gen_conditions, batch_gen_boi_ids)
+                loss = loss + denoise_loss * self.config.mm_denoise_weight
+            else:
+                # dummy forward but no comtribute to loss
+                batch_gen_images = [images_wo_scale_norm[0]]
+                batch_gen_conditions = [hidden_states[0]]
+                # und task has image
+                batch_gen_boi_ids = [boi_ids[0]]
+                denoise_loss = self.compute_denoise_loss(batch_gen_images, batch_gen_conditions, batch_gen_boi_ids)
+                loss = loss + denoise_loss * 0.0
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -261,6 +286,7 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
             vm_loss=vm_loss,
             eye_loss=eye_loss,
             mask_loss=mask_loss,
+            denoise_loss=denoise_loss,
         )
 
     @torch.no_grad()
@@ -298,6 +324,7 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
             )
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
+        print('generate exec 1')
         return super().generate(
             position_ids=position_ids,
             attention_mask=attention_mask,
@@ -315,10 +342,32 @@ class UnivaQwen2ForCausalLM(Qwen2ForCausalLM, UnivaMetaForCausalLM):
     ):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
+        print('\n\nbefore prepare_inputs_for_generation')
+        print(
+            'input_ids', input_ids, 
+            '\npast_key_values', len(past_key_values.key_cache), past_key_values.key_cache[0].shape if len(past_key_values.key_cache) > 0 else [], 
+            '\ninputs_embeds', inputs_embeds.shape if inputs_embeds is not None else 'None', 
+            '\ncache_position', kwargs['cache_position'].shape, 
+            '\nposition_ids', kwargs['position_ids'].shape if kwargs['position_ids'] is not None else 'None', 
+            '\nattention_mask', attention_mask.shape, 
+            '\nuse_cache', kwargs['use_cache'], 
+            )
+        # import ipdb;ipdb.set_trace()
         _inputs = super().prepare_inputs_for_generation(
             input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, attention_mask=attention_mask,
             **kwargs
         )
+        print('after prepare_inputs_for_generation')
+        print(
+            'input_ids', _inputs['input_ids'], 
+            '\npast_key_values', len(_inputs['past_key_values'].key_cache), _inputs['past_key_values'].key_cache[0].shape if len(_inputs['past_key_values'].key_cache) > 0 else 'None', 
+            '\ninputs_embeds', _inputs['inputs_embeds'].shape if _inputs['inputs_embeds'] is not None else 'None', 
+            '\ncache_position', _inputs['cache_position'].shape, 
+            '\nposition_ids', _inputs['position_ids'].shape if _inputs['position_ids'] is not None else 'None', 
+            '\nattention_mask', _inputs['attention_mask'].shape, 
+            '\nuse_cache', _inputs['use_cache'], 
+            )
+        # import ipdb;ipdb.set_trace()
         if images is not None:
             _inputs['images'] = images
         if image_sizes is not None:

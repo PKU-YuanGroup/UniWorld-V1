@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 from diffusers import StableDiffusion3Pipeline
 from .scheduler import OpenSoraPlanFlowMatchEulerScheduler
 
@@ -23,28 +22,57 @@ class SD3DenoiseTower(nn.Module):
             print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
 
-        self.denoise_tower = StableDiffusion3Pipeline.from_pretrained(self.denoise_tower_name, device_map=device_map)
+        denoise_tower = StableDiffusion3Pipeline.from_pretrained(self.denoise_tower_name, device_map=device_map)
         print(f'[debug]\tload pretrained weight from {self.denoise_tower_name}')
         print(f'[debug]\tis training? {self.unfreeze}')
-        self.denoise_tower.requires_grad_(self.unfreeze)
+        self.transformer = denoise_tower.transformer
+        self.vae = denoise_tower.vae
+        self.text_encoder = denoise_tower.text_encoder
+        self.text_encoder_2 = denoise_tower.text_encoder_2
+        self.tokenizer = denoise_tower.tokenizer
+        self.tokenizer_2 = denoise_tower.tokenizer_2
+
+        self.transformer.requires_grad_(self.unfreeze)
+        self.vae.requires_grad_(False)
+        self.text_encoder.requires_grad_(False)
+        self.text_encoder_2.requires_grad_(False)
+        del denoise_tower.text_encoder_3
+        del denoise_tower.tokenizer_3
         print(f"[debug]\tself.denoise_tower.requires_grad="
-              f"{self.denoise_tower.transformer.pos_embed.proj.weight.requires_grad}")
+              f"{self.transformer.pos_embed.proj.weight.requires_grad}")
 
         if pretrained is not None:
             print(f"=> loading pretrained mm_denoise_tower from {self.pretrained} ...")
-            self.denoise_tower.load_state_dict(torch.load(self.pretrained, map_location='cpu'))
+            self.load_state_dict(torch.load(self.pretrained, map_location='cpu'))
 
         self.is_loaded = True
 
+    def _encode_prompt_with_clip(self, text_encoder, tokenizer, prompt, device, batch_size):
+        if prompt == '':
+            max_length = 2  # begin token + 1
+        else:
+            max_length = 77
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        text_inputs = tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        prompt_embeds = text_encoder(text_inputs.input_ids.to(device), output_hidden_states=True)
+        pooled_prompt_embeds = prompt_embeds[0]
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat(batch_size, 1)
+        return pooled_prompt_embeds
+
     def inner_forward_batch(self, image, encoder_hidden_state):
         bsz, _, height, width = image.shape
-        image = self.denoise_tower.image_processor.preprocess(image, height=height, width=width)
+        image = ((image / 255.0) - 0.5) / 0.5
         image = image.to(device=self.device, dtype=self.dtype)
-        latent = self.denoise_tower.vae.encode(image).latent_dist.sample()
-        model_input = (latent / self.denoise_tower.vae.config.scaling_factor) + self.denoise_tower.vae.config.shift_factor
+        latent = self.vae.encode(image).latent_dist.sample()
+        model_input = (latent / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
         noise = torch.randn_like(model_input)
-        target = noise - model_input
 
         # Sample a random timestep for each image
         # for weighting schemes where we sample timesteps non-uniformly
@@ -58,12 +86,24 @@ class SD3DenoiseTower(nn.Module):
             sigmas = sigmas.unsqueeze(-1)
 
         noisy_model_input = self.noise_scheduler.add_noise(latent, sigmas, noise)
-        model_pred = self.denoise_tower.transformer(
+        pooled_prompt_embeds = self._encode_prompt_with_clip(
+            self.text_encoder, self.tokenizer, prompt='', device=self.device, batch_size=bsz
+            )
+        pooled_prompt_embeds_2 = self._encode_prompt_with_clip(
+            self.text_encoder_2, self.tokenizer_2, prompt='', device=self.device, batch_size=bsz
+            )
+        pooled_prompt_embeds = torch.cat([pooled_prompt_embeds, pooled_prompt_embeds_2], dim=-1)
+        model_pred = self.transformer(
             hidden_states=noisy_model_input, 
             encoder_hidden_states=encoder_hidden_state, 
+            pooled_projections=pooled_prompt_embeds, 
             timestep=timestep, 
-        )
-        return model_pred, target
+        ).sample
+
+        target = noise - model_input
+        weighting = self.noise_scheduler.compute_loss_weighting_for_sd3(sigmas=sigmas)
+
+        return model_pred, target, weighting
 
     def inner_forward(
         self,
@@ -73,18 +113,18 @@ class SD3DenoiseTower(nn.Module):
         bsz = len(images)
         
         if isinstance(images, list):
-            model_pred, target = tuple(zip(*[self.inner_forward_batch(self, images[i: i+1], encoder_hidden_states[i: i+1]) for i in range(bsz)]))
+            model_pred, target, weighting = tuple(zip(*[self.inner_forward_batch(images[i: i+1], encoder_hidden_states[i: i+1]) for i in range(bsz)]))
         else:
-            model_pred, target = self.inner_forward_batch(self, images, encoder_hidden_states)
-        return {'model_pred': model_pred, 'target': target}
+            model_pred, target, weighting = self.inner_forward_batch(images, encoder_hidden_states)
+        return {'model_pred': model_pred, 'target': target, 'weighting': weighting}
 
-    def forward(self, images):
+    def forward(self, images, encoder_hidden_states):
         if self.unfreeze:
-            denoiser_output = self.inner_forward(images)
+            denoiser_output = self.inner_forward(images, encoder_hidden_states)
             return denoiser_output
         else:
             with torch.no_grad():
-                denoiser_output = self.inner_forward(images)
+                denoiser_output = self.inner_forward(images, encoder_hidden_states)
                 return denoiser_output
 
     @torch.no_grad()
@@ -93,16 +133,16 @@ class SD3DenoiseTower(nn.Module):
 
     @property
     def dtype(self):
-        return self.denoise_tower.dtype
+        return self.transformer.dtype
 
     @property
     def device(self):
-        return self.denoise_tower.device
+        return self.transformer.device
 
     @property
     def config(self):
         if self.is_loaded:
-            return self.denoise_tower.config
+            return self.transformer.config
         else:
             return self.cfg_only
 

@@ -64,16 +64,18 @@ def main(args):
                 inp = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + inp
             else:
                 inp = DEFAULT_IMAGE_TOKEN + '\n' + inp
-                image = None
+            image = None
         
         conv.append_message(conv.roles[0], inp)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(model.device)
+        # print('prompt', prompt)
+        # print('input_ids', input_ids)
         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
         keywords = [stop_str]
-        streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+        streamer = TextStreamer(tokenizer, skip_prompt=False, skip_special_tokens=False)
 
         with torch.inference_mode():
             output_ids = model.generate(
@@ -83,7 +85,7 @@ def main(args):
                 do_sample=True if args.temperature > 0 else False,
                 temperature=args.temperature,
                 max_new_tokens=args.max_new_tokens,
-                # streamer=streamer,
+                streamer=streamer,
                 use_cache=True)
         print('output_ids', output_ids)
         outputs = tokenizer.decode(output_ids[0]).strip()
@@ -105,6 +107,6 @@ if __name__ == "__main__":
     parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
-    args.model_path = "/storage/lb/univa/FlowWorld/logs/ross/llava-conv-qwen2p5-3p0b-pt558k-sft737k-newenv-768-864/checkpoint-1000"
-    args.image_file = "/storage/dataset/ideogram/Images_ideogram_v1/_0ybW-IMQkegYTrJhm4XGw.jpg"
+    args.model_path = "/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403"
+    args.image_file = "/mnt/data/lb/Open-Sora-Plan/256x256_cfg7.0_t2i_umt5_ema/OpenSoraFlowMatchEuler_22_gs7.0_s100.jpg"
     main(args)

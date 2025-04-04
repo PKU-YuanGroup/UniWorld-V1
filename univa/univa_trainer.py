@@ -180,6 +180,8 @@ class UniVATrainer(Trainer):
                 lr_mapper["mm_eye_projector"] = self.args.mm_eye_projector_lr
             if self.args.mm_mask_projector_lr is not None:
                 lr_mapper["mm_mask_projector"] = self.args.mm_mask_projector_lr
+            if self.args.mm_denoise_projector_lr is not None:
+                lr_mapper["mm_denoise_projector_lr"] = self.args.mm_denoise_projector_lr
             if len(lr_mapper) > 0:
                 special_lr_parameters = [name for name, _ in opt_model.named_parameters() if any(module_keyword in name for module_keyword in lr_mapper)]
                 optimizer_grouped_parameters = [
@@ -234,7 +236,12 @@ class UniVATrainer(Trainer):
                         "weight_decay": 0.0,
                     },
                 ]
-
+                decay = [n for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)]
+                for n in decay:
+                    print(f'{n:<110}, decay: {self.args.weight_decay}')
+                nodecay = [n for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)]
+                for n in nodecay:
+                    print(f'{n:<110}, decay: 0.0')
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
             if self.args.local_rank == 0 or self.args.local_rank == -1:
@@ -309,6 +316,20 @@ class UniVATrainer(Trainer):
             if self.args.local_rank == 0 or self.args.local_rank == -1:
                 self.model.config.save_pretrained(output_dir)
                 torch.save(weight_to_save, os.path.join(output_dir, f'mm_mask_projector.bin'))
+        
+        elif getattr(self.args, 'tune_mm_denoise_mlp_adapter', False):
+            from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+            checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+
+            run_dir = self._get_output_dir(trial=trial)
+            output_dir = os.path.join(run_dir, checkpoint_folder)
+
+            # Only save Inv adapter
+            keys_to_match = ['mm_denoise_projector']
+            weight_to_save = get_mm_adapter_state_maybe_zero_3(self.model.named_parameters(), keys_to_match)
+            if self.args.local_rank == 0 or self.args.local_rank == -1:
+                self.model.config.save_pretrained(output_dir)
+                torch.save(weight_to_save, os.path.join(output_dir, f'mm_denoise_projector.bin'))
         else:
             self.model.generation_config.do_sample = True
             super(UniVATrainer, self)._save_checkpoint(model, trial)
@@ -329,6 +350,8 @@ class UniVATrainer(Trainer):
 
         if getattr(self.args, 'tune_mm_mlp_adapter', False):
             pass
+        elif getattr(self.args, 'tune_mm_denoise_mlp_adapter', False):
+            pass
         else:
             self.model.generation_config.do_sample = True
             super(UniVATrainer, self)._save(output_dir, state_dict)
@@ -346,12 +369,15 @@ class UniVATrainer(Trainer):
             self.eye_loss = []
         if self.state.global_step == 0:
             self.mask_loss = []
+        if self.state.global_step == 0:
+            self.denoise_loss = []
 
         # if self.state.global_step % (self.args.logging_steps * self.args.gradient_accumulation_steps) == 0:
         lm_loss = getattr(outputs, 'lm_loss', False)
         vm_loss = getattr(outputs, 'vm_loss', False)
         eye_loss = getattr(outputs, 'eye_loss', False)
         mask_loss = getattr(outputs, 'mask_loss', False)
+        denoise_loss = getattr(outputs, 'denoise_loss', False)
         if lm_loss:
             self.lm_loss.append(lm_loss)
         if vm_loss:
@@ -360,6 +386,8 @@ class UniVATrainer(Trainer):
             self.eye_loss.append(eye_loss)
         if mask_loss:
             self.mask_loss.append(mask_loss)
+        if denoise_loss:
+            self.denoise_loss.append(denoise_loss)
 
         return (loss, outputs) if return_outputs else loss
     
@@ -376,4 +404,7 @@ class UniVATrainer(Trainer):
         if getattr(self, 'mask_loss', False) and len(self.mask_loss) > 0:
             logs["mask_loss"] = round(torch.stack(self.mask_loss).detach().mean().item(), 4)
             self.mask_loss = []
+        if getattr(self, 'denoise_loss', False) and len(self.denoise_loss) > 0:
+            logs["denoise_loss"] = round(torch.stack(self.denoise_loss).detach().mean().item(), 4)
+            self.denoise_loss = []
         super().log(logs, *args, **kwargs)

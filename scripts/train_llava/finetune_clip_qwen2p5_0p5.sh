@@ -1,29 +1,25 @@
 #!/bin/bash
 export WANDB_API_KEY="953e958793b218efb850fa194e85843e2c3bd88b"
 # NCCL setting
-export GLOO_SOCKET_IFNAME=bond0
-export NCCL_SOCKET_IFNAME=bond0
-export NCCL_IB_HCA=mlx5_10:1,mlx5_11:1,mlx5_12:1,mlx5_13:1
+export NCCL_IB_TC=136
+export NCCL_IB_SL=5
 export NCCL_IB_GID_INDEX=3
-export NCCL_IB_TC=162
-export NCCL_IB_TIMEOUT=25
-export NCCL_PXN_DISABLE=0
-export NCCL_IB_QPS_PER_CONNECTION=4
-export NCCL_ALGO=Ring
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export NCCL_IB_RETRY_CNT=32
-export TOKENIZERS_PARALLELISM=false
+export NCCL_SOCKET_IFNAME=eth
+export NCCL_DEBUG=INFO
+export NCCL_IB_HCA=mlx5
+export NCCL_IB_TIMEOUT=22
+export NCCL_IB_QPS_PER_CONNECTION=8
+export NCCL_NET_PLUGIN=none
 
 
-cd /storage/lb/univa/FlowWorld
+cd /mnt/data/lb/UniVA/FlowWorld
 conda activate univa
-JSON_FOLDER="/storage/lb/dataset/Cambrian737k"
-IMAGE_FOLDER="/storage/lb/dataset/Cambrian737k"
-LLM="/storage/lb/checkpoints/Qwen/Qwen2.5-0.5B-Instruct"
-VISION_ENCODER="/storage/lb/checkpoints/openai/clip-vit-large-patch14-336"
-PRETRAIN_DIR="/storage/lb/logs/ross/llava-clip-qwen2p5-0p5b-pt558k-newenv"
-OUTPUT_DIR="/storage/lb/logs/ross/llava-clip-qwen2p5-0p5b-pt558k-sft737k-newenv"
+JSON_FOLDER="/mnt/data/datasets/Cambrian737k"
+IMAGE_FOLDER="/mnt/data/datasets/Cambrian737k"
+LLM="/mnt/data/checkpoints/Qwen/Qwen2.5-0.5B-Instruct"
+VISION_ENCODER="/mnt/data/checkpoints/openai/clip-vit-large-patch14-336"
+PRETRAIN_DIR="/mnt/data/lb/logs/ross/llava-clip-qwen2p5-0p5b-pt558k-newenv"
+OUTPUT_DIR="/mnt/data/lb/logs/ross/llava-clip-qwen2p5-0p5b-pt558k-sft737k-newenv"
 RUN_NAME="llava-clip-qwen2p5-0p5b-pt558k-sft737k-newenv"
 
 mkdir -p ${OUTPUT_DIR}

@@ -40,6 +40,7 @@ from univa.constants import (
     DEFAULT_IMAGE_TOKEN,
     DEFAULT_IM_START_TOKEN,
     DEFAULT_IM_END_TOKEN,
+    DEFAULT_GEN_IMAGE_TOKEN, 
 )
 from torch.utils.data import Dataset
 from univa.univa_trainer import UniVATrainer
@@ -107,11 +108,19 @@ class ModelArguments:
     mm_mask_depth: Optional[int] = field(default=0)
     mm_mask_weight: Optional[float] = field(default=1.0)
 
+    # denoise_tower_name
+    tune_mm_denoise_mlp_adapter: bool = field(default=False)
+    denoise_tower: Optional[str] = field(default=None)
+    pretrain_mm_denoise_mlp_adapter: Optional[str] = field(default=None)
+    mm_denoise_projector_type: Optional[str] = field(default='mask')
+    unfreeze_mm_denoise_tower: Optional[bool] = field(default=False)
+    mm_denoise_weight: Optional[float] = field(default=1.0)
+
+
 
 @dataclass
 class DataArguments:
-    data_path: str = field(default=None,
-                           metadata={"help": "Path to the training data."})
+    data_path: Optional[List[str]] = field(default=None, metadata={"help": "Path to the training data."})
     lazy_preprocess: bool = False
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default=None)
@@ -163,6 +172,8 @@ class TrainingArguments(transformers.TrainingArguments):
     mm_eye_projector_lr: Optional[float] = None
     # mask
     mm_mask_projector_lr: Optional[float] = None
+    # denoise
+    mm_denoise_projector_lr: Optional[float] = None
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -238,6 +249,21 @@ def find_all_linear_names(model):
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer,
                                    output_dir: str):
     """Collects the state dict and dump to disk."""
+
+    if getattr(trainer.args, "tune_mm_denoise_mlp_adapter", False):
+        # Only save Adapter
+        keys_to_match = ['mm_denoise_projector']
+        weight_mm_denoise_projector = get_mm_adapter_state_maybe_zero_3(trainer.model.named_parameters(), keys_to_match)
+
+        current_folder = output_dir.split('/')[-1]
+        parent_folder = os.path.dirname(output_dir)
+        if trainer.args.local_rank == 0 or trainer.args.local_rank == -1:
+            if current_folder.startswith('checkpoint-'):
+                mm_denoise_projector_folder = os.path.join(parent_folder, 'mm_denoise_projector')
+                os.makedirs(mm_denoise_projector_folder, exist_ok=True)
+                torch.save(weight_mm_denoise_projector, os.path.join(mm_denoise_projector_folder, f'{current_folder}.bin'))
+            else:
+                torch.save(weight_mm_denoise_projector, os.path.join(output_dir, f'mm_denoise_projector.bin'))
 
     if getattr(trainer.args, "tune_mm_mlp_adapter", False):
         # Only save Adapter
@@ -420,20 +446,29 @@ def preprocess_multimodal(
     is_multimodal = data_args.is_multimodal
     if not is_multimodal:
         return sources
-
+    
+    is_gen_task = False
     for source in sources:
-        for sentence in source:
+        len_source = len(source)
+        for idx, sentence in enumerate(source):
+            # DEFAULT_GEN_IMAGE_TOKEN must be the last image, and will be transform to DEFAULT_IMAGE_TOKEN
+            if DEFAULT_GEN_IMAGE_TOKEN in sentence["value"]:
+                sentence["value"] = sentence["value"].replace(DEFAULT_GEN_IMAGE_TOKEN, DEFAULT_IMAGE_TOKEN)
+                is_gen_task = True
+                assert idx + 1 == len_source
+
             if DEFAULT_IMAGE_TOKEN in sentence['value']:
                 sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '').strip()
                 sentence['value'] = DEFAULT_IMAGE_TOKEN + '\n' + sentence['value']
                 sentence['value'] = sentence['value'].strip()
                 if "mmtag" in conversation_lib.default_conversation.version:
                     sentence['value'] = sentence['value'].replace(DEFAULT_IMAGE_TOKEN, '<Image>' + DEFAULT_IMAGE_TOKEN + '</Image>')
+
             replace_token = DEFAULT_IMAGE_TOKEN
             if data_args.mm_use_im_start_end:
                 replace_token = DEFAULT_IM_START_TOKEN + replace_token + DEFAULT_IM_END_TOKEN
             sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
-    return sources
+    return sources, is_gen_task
 
 def expand2square(pil_img, background_color):
     width, height = pil_img.size
@@ -675,7 +710,13 @@ def preprocess_qwen_2(
     )
 
 
-def preprocess_qwen_chatml(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False, max_len=2048, system_message: str = "You are a helpful assistant.") -> Dict:
+def preprocess_qwen_chatml(
+        sources, 
+        tokenizer: transformers.PreTrainedTokenizer, 
+        has_image: bool = False, 
+        system_message: str = "You are a helpful assistant.", 
+        mm_use_im_start_end: bool = False, 
+        ) -> Dict:
     # roles = {"human": "<|im_start|>user", "gpt": "<|im_start|>assistant"}
     roles = {"human": "user", "gpt": "assistant"}
 
@@ -734,6 +775,8 @@ def preprocess_qwen_chatml(sources, tokenizer: transformers.PreTrainedTokenizer,
                 target += encode_id
         
 
+        if mm_use_im_start_end:
+            mask_tokens_ids = [tokenizer(DEFAULT_IM_START_TOKEN).input_ids[0], tokenizer(DEFAULT_IM_END_TOKEN).input_ids[0]]
                     
         assert len(input_id) == len(target), f"{len(input_id)} != {len(target)}"
         for idx, encode_id in enumerate(input_id):
@@ -741,6 +784,13 @@ def preprocess_qwen_chatml(sources, tokenizer: transformers.PreTrainedTokenizer,
                 target[idx] = encode_id
             if encode_id == image_token_index:
                 input_id[idx] = IMAGE_TOKEN_INDEX
+                
+        for idx, encode_id in enumerate(target):
+            if encode_id in mask_tokens_ids:
+                target[idx] = IGNORE_INDEX
+            if encode_id == image_token_index:  # to support multi-image and multi-turn
+                target[idx] = IGNORE_INDEX
+        # import ipdb;ipdb.set_trace()
         input_ids.append(input_id)
         targets.append(target)
     input_ids = torch.tensor(input_ids, dtype=torch.long)
@@ -769,7 +819,7 @@ def preprocess(
     if conversation_lib.default_conversation.version.startswith("v1"):
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "qwen_chatml":
-        return preprocess_qwen_chatml(sources, tokenizer, has_image=has_image)
+        return preprocess_qwen_chatml(sources, tokenizer, has_image=has_image, mm_use_im_start_end=mm_use_im_start_end)
     if conversation_lib.default_conversation.version == "qwen_2":
         return preprocess_qwen_2(sources, tokenizer, has_image=has_image)
     # add end signal and concatenate together
@@ -807,12 +857,19 @@ class LazySupervisedDataset(Dataset):
                  tokenizer: transformers.PreTrainedTokenizer,
                  data_args: DataArguments):
         super(LazySupervisedDataset, self).__init__()
-        with megfile.smart_open(data_path, "r", encoding="utf-8") as file:
-            list_data_dict = json.load(file)
+        data_path = [data_path] if not isinstance(data_path, list) else data_path
+
+        list_data_dict = []
+        for data in data_path:
+            with megfile.smart_open(data, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            for i in data:
+                i['id'] = len(list_data_dict)
+                list_data_dict.append(i)
 
         rank0_print("Formatting inputs...Skip in lazy mode")
         self.tokenizer = tokenizer
-        self.list_data_dict = list_data_dict[:200]
+        self.list_data_dict = list_data_dict
         self.data_args = data_args
 
     def __len__(self):
@@ -844,9 +901,11 @@ class LazySupervisedDataset(Dataset):
         raw_w, raw_h = image.size
         if self.data_args.image_aspect_ratio == 'pad':
             image = expand2square(image, tuple(int(x*255) for x in processor.image_mean))
+            image_wo_scale_norm = processor.preprocess(image, do_rescale=False, do_normalize=False, return_tensors='pt')['pixel_values'][0]
             image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
         elif self.data_args.image_aspect_ratio == 'square':
             # center crop
+            image_wo_scale_norm = processor.preprocess(image, do_rescale=False, do_normalize=False, return_tensors='pt')['pixel_values'][0]
             image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
         elif self.data_args.image_aspect_ratio == 'anyres':
             assert 'conv' in self.data_args.vision_tower.lower()
@@ -855,25 +914,27 @@ class LazySupervisedDataset(Dataset):
             h_bar, w_bar = smart_resize(raw_h, raw_w, factor=32, max_pixels=processor.min_pixels, min_pixels=processor.min_pixels)
             size = {'shortest_edge': min(h_bar, w_bar)}
             crop_size = (h_bar, w_bar)
+            image_wo_scale_norm = processor.preprocess(image, size=size, crop_size=crop_size, do_rescale=False, do_normalize=False, return_tensors='pt')['pixel_values'][0]
             image = processor.preprocess(image, size=size, crop_size=crop_size, return_tensors='pt')['pixel_values'][0]
         else:
             raise NotImplementedError(f"Only support {'pad', 'square', 'anyres'}, but found {self.data_args.image_aspect_ratio}")
         image_size = image.shape[1:]
-        return image, image_size
+        return image, image_wo_scale_norm, image_size
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         sources = self.list_data_dict[i]
         if isinstance(i, int):
             sources = [sources]
         assert len(sources) == 1, "Don't know why it is wrapped to a list"  # FIXME
+        is_gen_task = False
         if 'image' in sources[0]:
             image_file = self.list_data_dict[i]['image']
             image_file = [image_file] if not isinstance(image_file, list) else image_file
             '''
-            [[image, size], [image, size]]
+            [[image, image_wo_scale_norm, size], [image, image_wo_scale_norm, size]]
             '''
             image = [self.process_image(f) for f in image_file]
-            sources = preprocess_multimodal(
+            sources, is_gen_task = preprocess_multimodal(
                 copy.deepcopy([e["conversations"] for e in sources]),
                 self.data_args)
         else:
@@ -896,8 +957,10 @@ class LazySupervisedDataset(Dataset):
             crop_size = self.data_args.image_processor.crop_size
             data_dict['image'] = [(
                     torch.zeros(3, crop_size['height'], crop_size['width']), 
+                    torch.zeros(3, crop_size['height'], crop_size['width']), 
                     torch.tensor([crop_size['height'], crop_size['width']])
                 )]
+        data_dict['task_type'] = 'gen' if is_gen_task else 'und'
         return data_dict
 
 
@@ -908,8 +971,8 @@ class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids, labels = tuple([instance[key] for instance in instances]
-                                  for key in ("input_ids", "labels"))
+        input_ids, labels, task_types = tuple([instance[key] for instance in instances]
+                                  for key in ("input_ids", "labels", "task_type"))
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids,
             batch_first=True,
@@ -923,22 +986,23 @@ class DataCollatorForSupervisedDataset(object):
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            task_types=task_types, 
         )
 
         if 'image' in instances[0]:
             images = [instance['image'] for instance in instances]
             '''
             [
-            [[image, size], [image, size]]
-            [[image, size]]
+            [[image, image_wo_scale_norm, size], [image, image_wo_scale_norm, size]]
+            [[image, image_wo_scale_norm, size]]
             ]
             '''
-            batch["image_sizes"] = [im[1] for im_list in images for im in im_list]
-            images = [im[0] for im_list in images for im in im_list]
-            if all(x is not None and x.shape == images[0].shape for x in images):
-                batch['images'] = torch.stack(images)
-            else:
-                batch['images'] = images
+            batch["image_sizes"] = [im[-1] for im_list in images for im in im_list]
+            # images still wrap
+            images_wo_scale_norm = [[im[1] for im in im_list] for im_list in images]
+            images = [[im[0] for im in im_list] for im_list in images]
+            batch['images'] = images
+            batch['images_wo_scale_norm'] = images_wo_scale_norm
         return batch
 
 
@@ -1120,6 +1184,30 @@ def train(attn_implementation="flash_attention_2"):
         model.config.mm_inv_projector_lr = training_args.mm_inv_projector_lr
         model.config.mm_eye_projector_lr = training_args.mm_eye_projector_lr
         model.config.mm_mask_projector_lr = training_args.mm_mask_projector_lr
+
+        
+    if model_args.denoise_tower is not None:
+        denoise_tower = model.get_denoise_tower()
+        denoise_tower.to(dtype=torch.bfloat16 if training_args.bf16 else torch.float16, device=training_args.device)
+        data_args.denoise_tower = model_args.denoise_tower
+
+        model.config.tune_mm_denoise_mlp_adapter = training_args.tune_mm_denoise_mlp_adapter = model_args.tune_mm_denoise_mlp_adapter
+        if model_args.tune_mm_denoise_mlp_adapter:
+            model.requires_grad_(False)
+            for p in model.get_model().mm_denoise_projector.parameters():
+                p.requires_grad = True
+        else:
+            if training_args.gradient_checkpointing:
+                denoise_tower.transformer.enable_gradient_checkpointing()
+                pass
+        model.config.unfreeze_mm_denoise_tower = training_args.unfreeze_mm_denoise_tower = model_args.unfreeze_mm_denoise_tower
+        if training_args.unfreeze_mm_denoise_tower:
+            for p in model.get_model().denoise_tower.transformer.parameters():
+                p.requires_grad = True
+
+        if training_args.bits in [4, 8]:
+            model.get_model().mm_denoise_projector.to(dtype=compute_dtype, device=training_args.device)
+        model.config.mm_denoise_projector_lr = training_args.mm_denoise_projector_lr
 
     if training_args.bits in [4, 8]:
         from peft.tuners.lora import LoraLayer

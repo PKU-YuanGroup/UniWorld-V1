@@ -5,7 +5,6 @@ export NCCL_IB_TC=136
 export NCCL_IB_SL=5
 export NCCL_IB_GID_INDEX=3
 export NCCL_SOCKET_IFNAME=eth
-export NCCL_DEBUG=INFO
 export NCCL_IB_HCA=mlx5
 export NCCL_IB_TIMEOUT=22
 export NCCL_IB_QPS_PER_CONNECTION=8
@@ -13,37 +12,40 @@ export NCCL_NET_PLUGIN=none
 
 
 cd /mnt/data/lb/UniVA/FlowWorld
-conda activate univa
-JSON_FOLDER="/mnt/data/datasets/Cambrian737k"
-IMAGE_FOLDER="/mnt/data/datasets/Cambrian737k"
+JSON_FOLDER="/mnt/data/datasets/train_json"
+IMAGE_FOLDER="/mnt/data/datasets/LLaVA"
 LLM="/mnt/data/checkpoints/Qwen/Qwen2.5-3B-Instruct"
-VISION_ENCODER="/mnt/data/lb/logs/ross/llava-clip-qwen2p5-3p0b-pt558k-newenv-tunev/vision_tower"
-PRETRAIN_DIR="/mnt/data/lb/logs/ross/llava-clip-qwen2p5-3p0b-pt558k-newenv-tunev"
-OUTPUT_DIR="/mnt/data/lb/logs/ross/llava-clip-qwen2p5-3p0b-pt558k-sft737k-newenv-tunev12"
-RUN_NAME="llava-clip-qwen2p5-3p0b-pt558k-sft737k-newenv-tunev12"
+VISION_ENCODER="/mnt/data/checkpoints/google/siglip-so400m-patch14-384"
+DENOISE_DECODER="/mnt/data/checkpoints/stabilityai/stable-diffusion-3-medium-diffusers"
+PRETRAIN_DIR="/mnt/data/lb/logs/univa-sd3"
+OUTPUT_DIR="/mnt/data/lb/logs/univa-sd3-pt-test"
+RUN_NAME="univa-sd3-pt-test"
 
 mkdir -p ${OUTPUT_DIR}
 
-torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc-per-node=2 --nnodes 1 --node_rank 0 \
     --master_addr="localhost" --master_port="29805" \
     \
     train.py \
-    --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 4 \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 1 \
     --learning_rate 2e-5 \
     --warmup_ratio 0.03 \
     \
-    --unfreeze_mm_vision_tower True \
-    --mm_vision_tower_lr 2e-6 \
+    --denoise_tower ${DENOISE_DECODER} \
+    --mm_denoise_projector_lr 1e-4 \
+    --mm_denoise_projector_type mlp2x_gelu \
+    --tune_mm_denoise_mlp_adapter True \
+    \
+    --mm_use_im_start_end \
     \
     --deepspeed ./scripts/zero2.json \
     --model_name_or_path ${LLM} \
-    --pretrain_mm_mlp_adapter ${PRETRAIN_DIR}/mm_projector.bin \
     --output_dir ${OUTPUT_DIR} \
     --vision_tower ${VISION_ENCODER} \
     --version qwen_chatml \
     \
-    --data_path ${JSON_FOLDER}/Cambrian737k.json \
+    --data_path ${JSON_FOLDER}/univa_tune.json \
     --image_folder ${IMAGE_FOLDER} \
     \
     --mm_projector_type mlp2x_gelu \
@@ -55,7 +57,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --per_device_eval_batch_size 4 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 24000 \
+    --save_steps 1 \
     --save_total_limit 1 \
     --save_only_model \
     --weight_decay 0. \
@@ -64,7 +66,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --tf32 True \
     --model_max_length 4096 \
     --gradient_checkpointing True \
-    --dataloader_num_workers 16 \
+    --dataloader_num_workers 0 \
     --lazy_preprocess True \
-    --report_to wandb \
-    --run_name ${RUN_NAME} >> ${OUTPUT_DIR}/log.txt
+    --report_to tensorboard \
+    --run_name ${RUN_NAME} > log.txt

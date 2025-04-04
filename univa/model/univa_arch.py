@@ -131,6 +131,7 @@ class UnivaMetaModel:
         if mm_mask_adapter:
             self.image_embed_len = int(self.image_embed_len * model_args.mm_mask_ratio)
 
+
         ### build CLIP-LLM projector
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type', 'linear')
@@ -155,8 +156,12 @@ class UnivaMetaModel:
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
 
+        # build denoise
+        self.config.denoise_enable = False
+        self.config.mm_denoise_weight = model_args.mm_denoise_weight
         denoise_tower = getattr(model_args, "denoise_tower", None)
         if denoise_tower is not None:
+            self.config.denoise_enable = True
             self.config.mm_denoise_tower = denoise_tower
             pretrain_mm_denoise_mlp_adapter = model_args.pretrain_mm_denoise_mlp_adapter
 
@@ -175,7 +180,9 @@ class UnivaMetaModel:
                     denoise_tower = self.denoise_tower
                 denoise_tower.load_model()
 
-            self.config.mm_denoise_hidden_size = denoise_tower.hidden_size
+            self.config.mm_denoise_projector_type = getattr(model_args, 'mm_denoise_projector_type', 'linear')
+            self.config.mm_denoise_hidden_size = denoise_tower.transformer.config.joint_attention_dim
+
             if getattr(self, 'mm_denoise_projector', None) is None:
                 self.mm_denoise_projector = build_denoise_projector(self.config)
             else:
@@ -330,20 +337,27 @@ class UnivaMetaForCausalLM(ABC):
             image_features = self.get_model().mm_projector(image_features)
         return image_features, encoder_out
 
-    def decode_images(self, conditions):
-        conditions = self.get_model().mm_denoise_projector(conditions)
-        images = self.get_model().get_denoise_tower()(conditions)
-        return images
+    def decode_images(self, images, conditions):
+        if isinstance(conditions, list):
+            conditions = [self.get_model().mm_denoise_projector(i) for i in conditions]
+        else:
+            conditions = self.get_model().mm_denoise_projector(conditions)
+        denoiser_output = self.get_model().get_denoise_tower()(images, conditions)
+        return denoiser_output
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels,
         images, image_sizes=None, cache_position=None,
+        task_types=None,
     ):  
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None:
             return input_ids, position_ids, attention_mask, past_key_values, None, labels, None, None, cache_position, None
-
-        image_features, encoder_out = self.encode_images(images)
+        # there is no gen_task if is_tensor(images)
+        images_unwrap = [im for im_list in images for im in im_list]
+        if all(x is not None and x.shape == images_unwrap[0].shape for x in images_unwrap):
+            images_unwrap = torch.stack(images_unwrap)
+        image_features, encoder_out = self.encode_images(images_unwrap)
         
         
         # Let's just add dummy tensors if they do not exist,
@@ -387,9 +401,20 @@ class UnivaMetaForCausalLM(ABC):
             image_position = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist()
             # assert len(image_position) == 1
 
+            # boi_ids is the index of first image token, eoi_ids is the index of last image token
+            # <boi>  <img_token> * N  <eoi>
+            #   |                       |
+            # boi_ids - 1            eoi_ids + 1
+            print('image_position', image_position)
+            print(num_images, len(image_features))
             for i in range(num_images):
-                boi_ids[batch_idx].append(image_position[i])
-                eoi_ids[batch_idx].append(image_position[i] + image_features[cur_image_idx+i].shape[0] - 1)
+                if i == 0:
+                    boi_ids[batch_idx].append(image_position[i])
+                    eoi_ids[batch_idx].append(image_position[i] + image_features[cur_image_idx+i].shape[0] - 1)
+                else:
+                    delta_img_distance = image_position[i] - image_position[i-1]
+                    boi_ids[batch_idx].append(eoi_ids[batch_idx][-1] + delta_img_distance)
+                    eoi_ids[batch_idx].append(boi_ids[batch_idx][-1] + image_features[cur_image_idx+i].shape[0] - 1)
 
             image_token_indices = [-1] + image_position + [cur_input_ids.shape[0]]
             cur_input_ids_noim = []
@@ -420,9 +445,18 @@ class UnivaMetaForCausalLM(ABC):
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 
+            cur_is_gen_task = task_types is not None and task_types[batch_idx] == 'gen'
+            if cur_is_gen_task:
+                # need predict <im_start> and <im_end>
+                # <gen_image> is the last <image>
+                # <boi>  <img_token> * N  <eoi>
+                #   |                       |
+                # boi_ids - 1            eoi_ids + 1
+                cur_new_labels[boi_ids[batch_idx][-1] - 1] = self.config.im_start_token
+                cur_new_labels[eoi_ids[batch_idx][-1] + 1] = self.config.im_end_token
+
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
-
         # Truncate sequences to max length as image embeddings can make the sequence longer
         tokenizer_model_max_length = getattr(self.config, 'tokenizer_model_max_length', None)
         if tokenizer_model_max_length is not None:
@@ -624,6 +658,30 @@ class UnivaMetaForCausalLM(ABC):
         mask = mask * mask_loss_mask[:, None]
         mask_loss = (mask_loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return mask_loss
+    
+    def compute_denoise_loss(self, images, conditions, boi_ids):
+        # <gen_image> must be the last image
+        images = [img_list[-1] for img_list in images]
+        if all(x.shape == images[0].shape for x in images):
+            images = torch.stack(images)
+        else:
+            images = [i.unsqueeze(0) for i in images]
+        boi_ids = [boi_id[-1] for boi_id in boi_ids]
+        conditions = [cond[:boi_ids[idx]] for idx, cond in enumerate(conditions)]
+        if all(x.shape == conditions[0].shape for x in conditions):
+            conditions = torch.stack(conditions)
+        else:
+            conditions = [i.unsqueeze(0) for i in conditions]
+
+        denoiser_output = self.decode_images(images, conditions) 
+        model_pred = denoiser_output['model_pred']
+        weighting = denoiser_output['weighting']
+        target = denoiser_output['target']
+        # b, c, t, h, w = model_pred.shape
+        loss_mse = (weighting.float() * (model_pred.float() - target.float()) ** 2).reshape(target.shape[0], -1)
+        denoiser_loss = loss_mse.mean()
+        return denoiser_loss
+
 
 @dataclass
 class CausalLMOutputWithPastWithVM(ModelOutput):
@@ -631,6 +689,7 @@ class CausalLMOutputWithPastWithVM(ModelOutput):
     vm_loss: Optional[torch.FloatTensor] = None
     eye_loss: Optional[torch.FloatTensor] = None
     mask_loss: Optional[torch.FloatTensor] = None
+    denoise_loss: Optional[torch.FloatTensor] = None
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None

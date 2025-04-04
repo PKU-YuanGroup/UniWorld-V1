@@ -2,7 +2,7 @@ import os
 from huggingface_hub import HfApi, upload_file
 
 REPO_NAME = "LanguageBind/Cambrian737k"
-LOCAL_FOLDER = "/storage/lb/dataset/Cambrian737k"
+LOCAL_FOLDER = "/mnt/data/datasets/Cambrian737k"
 
 success_flag = False
 while not success_flag:

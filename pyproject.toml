@@ -13,14 +13,14 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
-    "torch==2.4.1", "torchvision==0.19.1",
+    "torch==2.5.1", "torchvision==0.20.1",
     "transformers==4.50.0", "tokenizers", "sentencepiece==0.1.99", "shortuuid",
     "accelerate==1.5.2", "peft==0.10.0", "bitsandbytes",
     "pydantic", "markdown2[all]", "numpy", "scikit-learn==1.2.2",
     "gradio==4.16.0", "gradio_client==0.8.1",
     "requests", "httpx==0.24.0", "uvicorn", "fastapi",
     "einops==0.6.1", "einops-exts==0.0.4", "timm==0.6.13",
-    "diffusers==0.30.0", "megfile", "torchdiffeq",
+    "diffusers==0.30.0", "megfile", "torchdiffeq", "datasets", "protobuf==3.20.0"
 ]
 
 [project.optional-dependencies]

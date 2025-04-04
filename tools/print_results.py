@@ -75,6 +75,6 @@ if os.path.exists(args.vlmevalkit_root):
 
 
 '''
-vlmevalkit="/storage/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k/eval/VLMEvalKit/T20250322_G8d5ba4ee"
+vlmevalkit="/mnt/data/lb/logs/ross/ross-clip-qwen2-0p5b-pt558k-sft737k/eval/VLMEvalKit/T20250322_G8d5ba4ee"
 python tools/print_results.py --vlmevalkit_root ${vlmevalkit} 
 '''

@@ -3,9 +3,9 @@
 # import os
 # import json
 
-# json_path = '/storage/lb/dataset/Cambrian737k.json'
+# json_path = '/mnt/data/datasets/Cambrian737k.json'
 # image_root = '/storage/nyw/Cambrian-10M'
-# save_root = '/storage/lb/dataset/Cambrian737k'
+# save_root = '/mnt/data/datasets/Cambrian737k'
 # with open(json_path, 'r', encoding='utf-8') as f:
 #     data = json.load(f)
 # image_paths = [os.path.join(image_root, i['image']) for i in tqdm(data) if 'image' in i]
@@ -32,9 +32,9 @@ import shutil
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 
-json_path = '/storage/lb/dataset/Cambrian737k.json'
+json_path = '/mnt/data/datasets/Cambrian737k.json'
 image_root = '/storage/nyw/Cambrian-10M'
-save_root = '/storage/lb/dataset/Cambrian737k'
+save_root = '/mnt/data/datasets/Cambrian737k'
 
 with open(json_path, 'r', encoding='utf-8') as f:
     data = json.load(f)

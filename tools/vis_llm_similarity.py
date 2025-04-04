@@ -3,12 +3,12 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 import torch
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
-# model_name = "/storage/lb/checkpoints/Qwen/Qwen2-0.5B-Instruct"
-# model_name = "/storage/lb/checkpoints/Qwen/Qwen2.5-7B-Instruct"
-model_name = "/storage/lb/checkpoints/Qwen/Qwen2.5-3B-Instruct"
-# model_name = "/storage/lb/checkpoints/Qwen/Qwen2.5-0.5B-Instruct"
-# model_name = "/storage/lb/checkpoints/lmsys/vicuna-7b-v1.5"
-# model_name = "/storage/lb/checkpoints/Qwen/Qwen2-7B"
+# model_name = "/mnt/data/checkpoints/Qwen/Qwen2-0.5B-Instruct"
+# model_name = "/mnt/data/checkpoints/Qwen/Qwen2.5-7B-Instruct"
+model_name = "/mnt/data/checkpoints/Qwen/Qwen2.5-3B-Instruct"
+# model_name = "/mnt/data/checkpoints/Qwen/Qwen2.5-0.5B-Instruct"
+# model_name = "/mnt/data/checkpoints/lmsys/vicuna-7b-v1.5"
+# model_name = "/mnt/data/checkpoints/Qwen/Qwen2-7B"
 
 model = AutoModelForCausalLM.from_pretrained(
     model_name,

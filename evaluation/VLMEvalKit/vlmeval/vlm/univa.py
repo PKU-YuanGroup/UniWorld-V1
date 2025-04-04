@@ -142,8 +142,9 @@ class UniVA(BaseModel):
                 images.append(msg['value'])
 
         images = [Image.open(s).convert('RGB') for s in images]
-        args = abstractproperty()
-        args.image_aspect_ratio = 'pad'
+        # args = abstractproperty()
+        # args.image_aspect_ratio = 'pad'
+        args = self.model.config
         image_tensor = process_images(images, self.image_processor, args).to('cuda', dtype=torch.float16)
         prompt = prompt.replace('PLACEHOLDER', content)
 
