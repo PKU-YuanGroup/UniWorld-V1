@@ -74,7 +74,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         print('[WARNING] CLIP is not loaded!! Loading now ...')
         vision_tower.load_model(device_map=device_map)
     if device_map != 'auto':
-        vision_tower.to(device=device_map, dtype=torch.float16)
+        vision_tower.to(device=device_map, dtype=kwargs['torch_dtype'])
     image_processor = vision_tower.image_processor
 
     new_size = getattr(model.config, 'mm_vision_resolution', False)
@@ -90,7 +90,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
         context_len = 4096
 
     if model.get_denoise_tower() is not None and not model.get_denoise_tower().is_build_pipeline:
-        model.get_denoise_tower().build_pipeline(dtype=torch.float16)
+        model.get_denoise_tower().build_pipeline(dtype=kwargs['torch_dtype'])
         model.get_denoise_tower().pipeline.to('cuda')
 
     return tokenizer, model, image_processor, context_len

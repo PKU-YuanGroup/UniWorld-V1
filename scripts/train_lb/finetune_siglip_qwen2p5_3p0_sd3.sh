@@ -18,8 +18,8 @@ LLM="/mnt/data/checkpoints/Qwen/Qwen2.5-3B-Instruct"
 VISION_ENCODER="/mnt/data/checkpoints/google/siglip-so400m-patch14-384"
 DENOISE_DECODER="/mnt/data/checkpoints/stabilityai/stable-diffusion-3-medium-diffusers"
 PRETRAIN_DIR="/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-pt"
-OUTPUT_DIR="/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft"
-RUN_NAME="univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft"
+OUTPUT_DIR="/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft-imend"
+RUN_NAME="univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft-imend"
 
 UNFREEZE_DENOISE_TOWER=False
 mkdir -p ${OUTPUT_DIR}
@@ -45,7 +45,7 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --vision_tower ${VISION_ENCODER} \
     --version qwen_chatml \
     \
-    --data_path ${JSON_FOLDER}/univa_tune__.json ${JSON_FOLDER}/univa_tune__.json ${JSON_FOLDER}/univa_tune__.json ${JSON_FOLDER}/univa_tune__.json \
+    --data_path ${JSON_FOLDER}/univa_tune__.json ${JSON_FOLDER}/univa_tune__.json \
     --image_folder ${IMAGE_FOLDER} \
     \
     --mm_projector_type mlp2x_gelu \
@@ -53,12 +53,12 @@ torchrun --nproc-per-node=8 --nnodes 1 --node_rank 0 \
     --image_aspect_ratio pad \
     --group_by_modality_length True \
     --bf16 True \
-    --num_train_epochs 100 \
+    --num_train_epochs 300 \
     --per_device_eval_batch_size 4 \
     --evaluation_strategy "no" \
     --save_strategy "steps" \
-    --save_steps 24000 \
-    --save_total_limit 1 \
+    --save_steps 10 \
+    --save_total_limit 300 \
     --save_only_model \
     --weight_decay 0. \
     --lr_scheduler_type "cosine" \

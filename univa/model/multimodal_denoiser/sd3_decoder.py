@@ -58,12 +58,12 @@ class SD3DenoiseTower(nn.Module):
     def build_pipeline(self, dtype=torch.float16, device_map=None):
         pipeline = StableDiffusion3Pipeline.from_pretrained(self.denoise_tower_name, device_map=device_map)
         self.pipeline = pipeline
-        self.pipeline.vae = self.vae
-        self.pipeline.transformer = self.transformer
-        self.is_build_pipeline = True
+        self.pipeline.vae = self.vae.to(dtype)
+        self.pipeline.transformer = self.transformer.to(dtype)
         self.pipeline.text_encoder.to(dtype)
         self.pipeline.text_encoder_2.to(dtype)
         self.pipeline.text_encoder_3.to(dtype)
+        self.is_build_pipeline = True
 
     def _get_t5_prompt_embeds(self, text_encoder, tokenizer, max_sequence_length, prompt=''):
         prompt = [prompt] if isinstance(prompt, str) else prompt

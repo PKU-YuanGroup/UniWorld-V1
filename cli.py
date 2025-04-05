@@ -27,9 +27,12 @@ def main(args):
     # Model
     disable_torch_init()
 
+    # torch_dtype = torch.bfloat16
+    torch_dtype = torch.float16
     model_name = get_model_name_from_path(args.model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(args.model_path, args.model_base, model_name, args.load_8bit, args.load_4bit, device=args.device)
-    model = model.to(torch.float16)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(
+        args.model_path, args.model_base, model_name, args.load_8bit, args.load_4bit, device=args.device, torch_dtype=torch_dtype
+        )
     if "qwen2" in model_name.lower():
         conv_mode = "qwen_chatml"
     else:
@@ -39,13 +42,13 @@ def main(args):
     roles = conv.roles
 
     image = load_image(args.image_file)
-    image_w, image_h = image.size
     # Similar operation in model_worker.py
     image_tensor = process_images([image], image_processor, model.config)
+    image_h, image_w = image_tensor.shape[-2:]
     if type(image_tensor) is list:
-        image_tensor = [image.to(model.device, dtype=torch.float16) for image in image_tensor]
+        image_tensor = [image.to(model.device, dtype=torch_dtype) for image in image_tensor]
     else:
-        image_tensor = image_tensor.to(model.device, dtype=torch.float16)
+        image_tensor = image_tensor.to(model.device, dtype=torch_dtype)
 
     while True:
         try:
@@ -107,7 +110,8 @@ if __name__ == "__main__":
     parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
-    args.model_path = "/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft"
+    # args.model_path = "/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft-debug-debug"
+    args.model_path = "/mnt/data/lb/logs/univa/univa-siglip-qwen2p5-3p0b-pt558k-sft737k-mmtag-0403-stage3-ft-imend"
     args.image_file = "/mnt/data/datasets/LLaVA/llava_image_tune/coco/train2017/000000033471.jpg"
     main(args)
 
