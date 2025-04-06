@@ -1,5 +1,4 @@
 import logging
-from logging import DEBUG, INFO, WARNING, ERROR
 import sys
 def setup_logger(name=__name__, level=logging.INFO):
     logger = logging.getLogger(name)

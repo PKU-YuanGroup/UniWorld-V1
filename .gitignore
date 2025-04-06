@@ -10,3 +10,6 @@
 **/vgg.pth
 logs
 sd3.py
+models
+*.png
+*.jpg

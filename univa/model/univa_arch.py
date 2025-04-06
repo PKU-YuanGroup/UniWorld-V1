@@ -43,7 +43,9 @@ from univa.constants import (
     DEFAULT_IM_END_TOKEN,
 )
 from univa.mm_utils import process_images
+from univa.logger import setup_logger
 
+logger = setup_logger(__name__, level='DEBUG')
 
 class UnivaMetaModel:
 
@@ -51,11 +53,15 @@ class UnivaMetaModel:
         super(UnivaMetaModel, self).__init__(config)
 
         if hasattr(config, "mm_vision_tower"):
+            logger.debug(f"Building vision tower: {config.mm_vision_tower}")
             self.vision_tower = build_vision_tower(config, delay_load=False)
             self.mm_projector = build_vision_projector(config)
+            logger.debug(f"Vision tower loaded!")
         if getattr(config, "mm_denoise_tower", None) is not None:
+            logger.debug(f"Building denoise tower: {config.mm_denoise_tower}")
             self.denoise_tower = build_denoise_tower(config, delay_load=False)
             self.mm_denoise_projector = build_denoise_projector(config)
+            logger.debug(f"Denoise tower loaded!")
 
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)
@@ -357,6 +363,7 @@ class UnivaMetaForCausalLM(ABC):
     
     def sample_and_process_images(self, image_size, conditions, **kwargs):
         images = self.sample_images(image_size, conditions, **kwargs)
+        images.save("tmp.png")
         (gen_w, gen_h) = images.size
         assert gen_h == image_size[0] and gen_w == image_size[1]
         # images = Image.open("/mnt/data/datasets/LLaVA/llava_image_tune/coco/train2017/000000033471.jpg").convert('RGB')

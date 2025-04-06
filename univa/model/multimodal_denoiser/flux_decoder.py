@@ -4,9 +4,10 @@ from copy import deepcopy
 from PIL import Image
 from diffusers import FluxPipeline, FluxTransformer2DModel, AutoencoderKL
 from .scheduler import OpenSoraPlanFlowMatchEulerScheduler
-from univa.logger import setup_logger, DEBUG
+from univa.logger import setup_logger
+from transformers import CLIPTextModel, CLIPTokenizer
 
-logger = setup_logger(__name__, level=DEBUG)
+logger = setup_logger(__name__, level="DEBUG")
 
 class FluxDenoiseTower(nn.Module):
     def __init__(self, denoise_tower: str, args, delay_load=False):
@@ -41,27 +42,28 @@ class FluxDenoiseTower(nn.Module):
             )
             return
 
-        self.transformer = FluxTransformer2DModel.from_pretrained(
-            self.denoise_tower_name, subfolder="transformer", device_map=device_map
+        self.transformer = FluxTransformer2DModel.from_config(
+            self.denoise_tower_name, subfolder="transformer"
         )
-        self.vae = AutoencoderKL.from_pretrained(
-            self.denoise_tower_name, subfolder="vae", device_map=device_map
+        self.vae = AutoencoderKL.from_config(
+            self.denoise_tower_name, subfolder="vae"
         )
-        pipeline = FluxPipeline.from_pretrained(
-            self.denoise_tower_name,
-            transformer=self.transformer,
-            vae=self.vae,
-            device_map=device_map,
+        text_encoder = CLIPTextModel.from_pretrained(
+            self.denoise_tower_name, subfolder="text_encoder"
+        )
+        tokenizer = CLIPTokenizer.from_pretrained(
+            self.denoise_tower_name, subfolder="tokenizer"
         )
 
         self.transformer.requires_grad_(self.unfreeze)
-
+        self.vae.requires_grad_(False)
+        
         # 1 1 dim
         self.register_buffer(
             "pooled_prompt_embeds",
             self._get_pooled_prompt_embeds(
-                pipeline.text_encoder,
-                pipeline.tokenizer,
+                text_encoder,
+                tokenizer,
                 prompt="",
             ),
         )
@@ -72,15 +74,11 @@ class FluxDenoiseTower(nn.Module):
 
         self.is_loaded = True
 
-    def build_pipeline(self, dtype: torch.dtype = torch.float16, device_map=None):
+    def build_pipeline(self, dtype: torch.dtype = torch.float16):
         pipeline = FluxPipeline.from_pretrained(
-            self.denoise_tower_name, device_map=device_map
+            self.denoise_tower_name, transformer=self.transformer, vae=self.vae, torch_dtype=dtype
         )
         self.pipeline = pipeline
-        self.pipeline.vae = self.vae.to(dtype)
-        self.pipeline.transformer = self.transformer.to(dtype)
-        self.pipeline.text_encoder.to(dtype)
-        self.pipeline.text_encoder_2.to(dtype)
         self.is_build_pipeline = True
 
     def _get_t5_prompt_embeds(
@@ -267,23 +265,11 @@ class FluxDenoiseTower(nn.Module):
         **kwargs,
     ):
         pooled_prompt_embeds = self.pooled_prompt_embeds
-        negative_pooled_prompt_embeds = self.pooled_prompt_embeds
-        negative_prompt_embeds = self._get_t5_prompt_embeds(
-            self.pipeline.text_encoder_2,
-            self.pipeline.tokenizer_2,
-            prompt_embeds.shape[1],
-        )
-        assert (
-            negative_prompt_embeds.shape[1] >= prompt_embeds.shape[1]
-        ), f"negative_prompt_embeds.shape ({negative_prompt_embeds.shape}) vs prompt_embeds.shape ({prompt_embeds.shape})"
-        negative_prompt_embeds = negative_prompt_embeds[:, : prompt_embeds.shape[1]]
         images = self.pipeline(
             height=image_size[0],
             width=image_size[1],
             prompt_embeds=prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
-            negative_prompt_embeds=negative_prompt_embeds,
-            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             output_type=output_type,
