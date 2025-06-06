@@ -6,7 +6,10 @@ from typing import Literal, Optional, Union
 
 class UnivaVisionTowerConfig(PretrainedConfig):
     model_type = "univa_vision_tower"
-
+    sub_configs = {
+        "vision_tower_config": SiglipVisionConfig,
+    }
+    
     def __init__(
         self,
         vision_tower_type: Literal["siglip"] = "siglip",

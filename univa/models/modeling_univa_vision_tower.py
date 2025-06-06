@@ -8,7 +8,8 @@ import torch.nn as nn
 class UnivaVisionTower(PreTrainedModel):
     config_class = UnivaVisionTowerConfig
     base_model_prefix = "model"
-
+    _supports_flash_attn_2 = True
+    
     def __init__(self, config: UnivaVisionTowerConfig):
         super().__init__(config)
         self.config = config

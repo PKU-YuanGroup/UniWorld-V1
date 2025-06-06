@@ -18,6 +18,7 @@ class UnivaDenoiseTowerConfig(PretrainedConfig):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self._attn_implementation_autoset = True
 
         self.denoiser_type = denoiser_type
         self.denoise_projector_type = denoise_projector_type
