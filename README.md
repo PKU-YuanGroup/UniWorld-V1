@@ -138,13 +138,20 @@ CUDA_VISIBLE_DEVICES=0 python -m univa.serve.cli \
 4.Run with gradio
 Highly recommend trying out our web demo by the following command.
 ```bash
-python univa.serve.gradio_web_server.py --model_path ${MODEL_PATH} --flux_path ${FLUX_PATH} --siglip_path ${SIGLIP_PATH}
+python app.py --model_path ${MODEL_PATH} --flux_path ${FLUX_PATH} --siglip_path ${SIGLIP_PATH}
 ```
 
-For 24G VRAM GPU, download [wikeeyang/UniWorld-V1-NF4](https://huggingface.co/wikeeyang/UniWorld-V1-NF4) to ${MODEL_PATH}, Thank you [@gluttony-10](https://github.com/gluttony-10) very much for contribution! Then you can run the following command:
+For 24G VRAM GPU on Linux, use NF4 quantization. Thank you [@gluttony-10](https://github.com/gluttony-10) very much for contribution! Then you can run the following command:
 ```bash
-python univa.serve.gradio_web_server.py --model_path ${MODEL_PATH} --flux_path ${FLUX_PATH} --siglip_path ${SIGLIP_PATH} --nf4
+python app.py --model_path ${MODEL_PATH} --flux_path ${FLUX_PATH} --siglip_path ${SIGLIP_PATH} --nf4
 ```
+Or download [wikeeyang/UniWorld-V1-NF4](https://huggingface.co/wikeeyang/UniWorld-V1-NF4) to ${MODEL_PATH}, and download [diffusers/FLUX.1-dev-bnb-4bit](https://huggingface.co/diffusers/FLUX.1-dev-bnb-4bit) to ${FLUX_PATH} instead.
+
+For 24G VRAM GPU on Windows, use NF4 quantization and offload. It just cost 20G VRAM. Then you can run the following command:
+```bash
+python app.py --model_path ${MODEL_PATH} --flux_path ${FLUX_PATH} --siglip_path ${SIGLIP_PATH} --nf4 --offload
+```
+In order to use the Chinese language, run with --zh.
 
 5.Run with ComfyUI
 
