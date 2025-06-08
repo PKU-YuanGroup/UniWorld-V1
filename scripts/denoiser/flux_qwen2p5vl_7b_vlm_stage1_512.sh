@@ -25,7 +25,7 @@ NUM_PROCESSES=$((8 * WORLD_SIZE))
   # ema_pretrained_lvlm_name_or_path: same with pretrained_lvlm_name_or_path when the first training
   # pretrained_denoiser_name_or_path
 accelerate launch \
-  --config_file scripts/accelerate_configs/ddp_config.yaml \
+  --config_file scripts/accelerate_configs/multi_node_example_zero1.yaml \
   --main_process_ip ${MASTER_ADDR} \
   --main_process_port ${MASTER_PORT} \
   --machine_rank ${RANK} \

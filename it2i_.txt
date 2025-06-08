@@ -1,0 +1,1 @@
+/mnt/data/osp/imgdata,/mnt/data/captions/img_cap/cap_final/cap_merge_final/25_4_10_finetune_lb/rec/osp_hw1280-4096_ratio0.8_aes4.75_rec_131362.json,false
