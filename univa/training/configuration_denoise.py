@@ -116,6 +116,8 @@ class DatasetConfig:
     validation_SEGit2i_prompt: Optional[str] = None
     validation_SEGit2i_path: Optional[str] = None
 
+    validation_redux_path: Optional[List[str]] = None
+
 @dataclass
 class ModelConfig:
     pretrained_lvlm_name_or_path: str

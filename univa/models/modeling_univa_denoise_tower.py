@@ -17,6 +17,7 @@ class UnivaDenoiseTower(PreTrainedModel):
 
     def __init__(self, config: UnivaDenoiseTowerConfig):
         super().__init__(config)
+        self._attn_implementation_autoset = True
         self.config = config
         if config.denoiser_type == "flux":
             self.denoiser = FluxTransformer2DModel.from_config(config.denoiser_config)
@@ -103,65 +104,6 @@ class UnivaDenoiseTower(PreTrainedModel):
             ),
         )
         
-    @staticmethod
-    def _insert_image_feats(
-            encoder_h, img_feats, img_pos, 
-            output_hidden_size, vae_projector
-            ):
-        """
-        encoder_h: Tensor[B, L, D]
-        img_feats: list of B lists: 第 i 个元素是一个 list，长度 = len(img_pos[i])，
-                其内第 k 项是一个 Tensor[Nik, D]
-        img_pos:   list of B lists: 第 i 个元素是个位置列表 [p_i0, p_i1, ...]
-                len(img_pos[i]) == len(img_feats[i])
-        returns:   Tensor[B, L + Nmax, D]，在各自位置插入完后，按最长插入数 pad 右侧
-        """
-        B, L, D = encoder_h.shape
-        device = encoder_h.device
-
-        # —— 1. 每个样本先把多组 feats concat 成一条“插入流”，同时 expand positions
-        flat_feats = []
-        flat_pos   = []
-        for feats_list, pos_list in zip(img_feats, img_pos):
-            assert len(feats_list) == len(pos_list)
-            # feats_list = [Tensor[N0,D], Tensor[N1,D], ...]
-            # pos_list   = [p0,      p1,       ...]
-            # concat 所有要插入的 tokens
-            if len(feats_list) == 0:
-                # 没有插入
-                concat_f = torch.empty(0, output_hidden_size, device=device)
-                pos_expanded = torch.empty(0, dtype=torch.long, device=device)
-            else:
-                concat_f = torch.cat(feats_list, dim=0)    # [Ni_total, D]
-                concat_f = vae_projector(concat_f)
-                # 对应位置也 expand 成同样长度
-                # eg. feats_list[0].shape[0] 个 p0， feats_list[1].shape[0] 个 p1，…
-                # ATTENTION p-1
-                pos_expanded = torch.cat([
-                    torch.full((f.shape[0],), p-1, dtype=torch.long, device=device)
-                    for f, p in zip(feats_list, pos_list)
-                ], dim=0)                                   # [Ni_total]
-            flat_feats.append(concat_f)
-            flat_pos.append(pos_expanded)
-
-        # —— 2. pad 到同一个长度 Nmax
-        padded_feats = pad_sequence(flat_feats, batch_first=True)    # [B, Nmax, D]
-        pos_pad = pad_sequence(flat_pos, batch_first=True, padding_value=L)
-
-        # —— 3. 准备所有 token 的“排序键”（sort‐key）
-        # 原 token j 的 key = 2*j
-        orig_key = (torch.arange(L, device=device) * 2).unsqueeze(0).expand(B, -1)       # [B, L]
-        # 插入 token 的 key = 2*pos + 1
-        ins_key  = pos_pad * 2 + 1                                                      # [B, Nmax]
-
-        # —— 4. 拼接、一次性排序 + gather
-        all_keys   = torch.cat([orig_key,    ins_key],    dim=1)                        # [B, L+Nmax]
-        all_feats  = torch.cat([encoder_h, padded_feats], dim=1)                        # [B, L+Nmax, D]
-        sort_idx   = all_keys.argsort(dim=1)                                            # [B, L+Nmax]
-        new_seq    = all_feats.gather(1, sort_idx.unsqueeze(-1).expand(-1, -1, D))      # [B, L+Nmax, D]
-
-        return new_seq
-
     def forward(
         self,
         hidden_states: torch.Tensor,
