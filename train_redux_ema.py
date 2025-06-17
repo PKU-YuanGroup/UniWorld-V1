@@ -16,7 +16,7 @@ from accelerate import Accelerator, DistributedDataParallelKwargs, DistributedTy
 from accelerate.utils import ProjectConfiguration, set_seed
 from univa.models import MODEL_TYPE
 from univa.models.modeling_univa_denoise_tower import UnivaDenoiseTower
-from univa.models.modeling_univa_denoise_tower_v1_1 import UnivaDenoiseTower_V1_1
+from univa.models.modeling_univa_denoise_tower_v1_1 import UnivaDenoiseTower_V1_1, ReduxImageEncoder
 from univa.dataset import ReduxDataset
 from univa.dataset.data_collator import DataCollator, pad_list_of_tensors
 from univa.utils.prompter import PROMPT_TYPE
@@ -238,7 +238,8 @@ class JointModel(nn.Module):
                 w=width // self.siglip_model.config.patch_size,
             )
 
-        siglip_hidden_states = self.lvlm_model.siglip_projector(siglip_hidden_states)
+        aspect_ratio = kwargs.pop('aspect_ratio')
+        siglip_hidden_states = self.lvlm_model.siglip_projector(siglip_hidden_states, aspect_ratio).image_embeds
 
         if random.random() > 0.0:
             encoder_hidden_states = torch.cat([empty_t5_prompt_embeds, siglip_hidden_states], dim=1)
@@ -248,10 +249,10 @@ class JointModel(nn.Module):
         kwargs.update({
                 "encoder_hidden_states": encoder_hidden_states,
             })
-        if self.args.dataset_config.anyres == 'any_1ratio':
-            return self.lvlm_model.compile_forward(**kwargs)
-        else:
-            return self.lvlm_model(**kwargs)
+        # if self.args.dataset_config.anyres == 'any_1ratio':
+        #     return self.lvlm_model.compile_forward(**kwargs)
+        # else:
+        return self.lvlm_model(**kwargs)
 
     
 def pad_x_and_mask(model_input, attention_mask=None, max_h=None, max_w=None):
@@ -290,6 +291,7 @@ def create_ema_model(
         model_config,
         ema_model_state_dict,
         ds_config=None, 
+        weight_file_prefix=None, 
         ):
     # model_config = AutoConfig.from_pretrained(model_name_or_path)
     ds_config["train_micro_batch_size_per_gpu"] = args.dataset_config.batch_size
@@ -307,7 +309,7 @@ def create_ema_model(
         dschf = None
             
     if resume_checkpoint_path:
-        ema_model_path = os.path.join(resume_checkpoint_path, "model_ema")
+        ema_model_path = os.path.join(resume_checkpoint_path, "redux_ema")
         if os.path.exists(ema_model_path):
             ema_model = EMAModel.from_pretrained(ema_model_path, model_cls=model_cls)
             accelerator.print(f'Successully resume EMAModel from {ema_model_path}')
@@ -330,7 +332,8 @@ def create_ema_model(
         # model.config.hidden_size = 4096
         ema_model = EMAModel(
             model, decay=args.training_config.ema_decay,
-            model_cls=model_cls, model_config=model_config
+            model_cls=model_cls, model_config=model_config, 
+            weight_file_prefix=weight_file_prefix, 
             )
         accelerator.print(f"EMAModel finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
         accelerator.print(f'Successully deepcopy EMAModel from model')
@@ -501,9 +504,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     if args.training_config.gradient_checkpointing:
         lvlm_model.denoiser.enable_gradient_checkpointing()
 
-    siglip_model = torch.compile(siglip_model)
-    if args.dataset_config.anyres == 'any_1ratio':
-        vae = torch.compile(vae)
+    # if args.dataset_config.anyres == 'any_1ratio':
+    #     siglip_model = torch.compile(siglip_model)
+    #     vae = torch.compile(vae)
     joint_model = JointModel(args, lvlm_model, siglip_model)
 
     # Setup model saving and loading
@@ -514,6 +517,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     if isinstance(accelerator.unwrap_model(model).lvlm_model, UnivaDenoiseTower_V1_1):
                         accelerator.unwrap_model(model).lvlm_model.save_pretrained(
                             os.path.join(output_dir, "univa"),
+                        )
+                        accelerator.unwrap_model(model).lvlm_model.siglip_projector.save_pretrained(
+                            os.path.join(output_dir, "redux"),
                         )
                     if args.model_config.lora_r > 0:
                         if args.training_config.drop_lora_rate > 0.0:
@@ -526,7 +532,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 if weights:
                     weights.pop()
         if args.training_config.ema_deepspeed_config_file is not None:
-            ema_model.save_pretrained(os.path.join(output_dir, "model_ema"))
+            ema_model.save_pretrained(os.path.join(output_dir, "redux_ema"))
 
     def load_model_hook(models, input_dir):
         for _ in range(len(models)):
@@ -641,7 +647,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 param.requires_grad_(True)
 
         if not args.model_config.with_tune_pretrained_redux_mlp:
-            for i, module in enumerate(joint_model.lvlm_model.siglip_projector):
+            for i, module in enumerate(joint_model.lvlm_model.siglip_projector.siglip_projector):
                 if i < 3:
                     for param in module.parameters():
                         param.requires_grad = False
@@ -658,8 +664,10 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         with open(args.training_config.ema_deepspeed_config_file, 'r') as f:
             ds_config = json.load(f)
         ema_model = create_ema_model(
-            accelerator, args, resume_checkpoint_path, model_cls=UnivaDenoiseTower_V1_1, model_config=joint_model.lvlm_model.config, 
-            ema_model_state_dict=ema_model_state_dict, ds_config=ds_config
+            accelerator, args, resume_checkpoint_path, model_cls=ReduxImageEncoder, 
+            model_config=joint_model.lvlm_model.siglip_projector.config, 
+            ema_model_state_dict=ema_model_state_dict, ds_config=ds_config, 
+            weight_file_prefix='diffusion_pytorch_model', 
             )
 
         accelerator.print(f"Load ema model finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
@@ -1114,7 +1122,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
 
             if accelerator.sync_gradients:        
                 if args.training_config.ema_deepspeed_config_file is not None and global_step % args.training_config.ema_update_freq == 0:
-                    ema_model.step(joint_model.module.lvlm_model.parameters())
+                    ema_model.step(joint_model.module.lvlm_model.siglip_projector.parameters())
 
                 progress_bar.update(1)
                 global_step += 1
@@ -1158,7 +1166,10 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     save_path = os.path.join(
                         args.training_config.output_dir, f"checkpoint-{global_step}"
                     )
+                    # try:
                     accelerator.save_state(save_path)
+                    # except Exception as e:
+                    #     print(f'RANK: {accelerator.process_index}, error in save_state with {e}')
                     if args.model_config.only_tune_siglip_mlp or args.model_config.with_tune_siglip_mlp:
                         keys_to_match = ['siglip_projector']
                         weight_siglip_mlp = get_mm_adapter_state_maybe_zero_3(joint_model.module.lvlm_model.named_parameters(), keys_to_match)
@@ -1261,7 +1272,7 @@ def log_validation(
     width, height = image.size
     anchor_pixels = args.dataset_config.width * args.dataset_config.height
     gen_height, gen_width = dynamic_resize(height, width, args.dataset_config.anyres, anchor_pixels)
-    
+    aspect_ratio = torch.tensor([gen_height/gen_width]).to(device=accelerator.device)
     siglip_pixel_values = siglip_processor(images=image, return_tensors='pt', do_resize=True, do_center_crop=True).pixel_values
     siglip_pixel_values = siglip_pixel_values.to(
         accelerator.device, 
@@ -1294,7 +1305,7 @@ def log_validation(
             w=width // siglip_model.config.patch_size,
         )
 
-    encoder_hidden_states = unwrapped_lvlm_model.siglip_projector(siglip_features)
+    encoder_hidden_states = unwrapped_lvlm_model.siglip_projector(siglip_features, aspect_ratio).image_embeds
     
     if empty_t5_prompt_embeds is None or empty_pooled_prompt_embeds is None:
         empty_t5_prompt_embeds = torch.zeros(1, 512, 4096, device=accelerator.device)

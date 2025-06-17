@@ -546,6 +546,12 @@ class UnivaQwen2p5VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, Generati
                 return self.forward_denoise_tower(
                     outputs, **denoiser_kwargs
                 )
+            elif output_type == "denoise_model_pred_with_vlm_logits":
+                # LM outputs -> MLP2 -> Denoiser -> model_pred
+                denoiser_kwargs['enc_attention_mask'] = attention_mask
+                return self.forward_denoise_tower(
+                    outputs, **denoiser_kwargs
+                ), self.lm_head(hidden_states)
             else:
                 raise ValueError(f"Unknown output_type: {output_type}.")
 

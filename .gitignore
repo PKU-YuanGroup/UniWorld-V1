@@ -18,7 +18,10 @@ eval_output_t5
 hf_cache
 eval_output_flux
 **/*.pem
-trainable_params.txt
+*.txt
+*.json
 **/imgedit_asset
 VLMEvalKit
 **/.gradio
+*_demo
+tests

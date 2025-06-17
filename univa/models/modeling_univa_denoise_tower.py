@@ -9,6 +9,7 @@ from diffusers import FluxTransformer2DModel, SD3Transformer2DModel
 from diffusers.utils import is_torch_version
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from torch.nn.utils.rnn import pad_sequence
+from einops.layers.torch import Rearrange
 
 
 class UnivaDenoiseTower(PreTrainedModel):
@@ -27,7 +28,6 @@ class UnivaDenoiseTower(PreTrainedModel):
             raise ValueError(f"Unknown denoiser type: {config.denoiser_type}")
 
         self._init_denoise_projector()
-        self._init_vae_projector()
         self._init_siglip_projector()
 
     def _init_denoise_projector(self):
@@ -47,37 +47,10 @@ class UnivaDenoiseTower(PreTrainedModel):
             raise ValueError(
                 f"Unknown denoise_projector_type: {self.config.denoise_projector_type}"
             )
-
-    def _init_vae_projector(self):
-        """Initialize the denoise_projector for multi model input."""
-        if self.config.vae_projector_type == "mlp2x_gelu":
-            self.vae_projector = nn.Sequential(
-                nn.Linear(
-                    self.config.vae_input_hidden_size,
-                    # 2 * self.config.output_hidden_size,
-                    3072,  # HARDCODE, x_embedder from flux
-                ),
-                nn.SiLU(),
-                nn.Linear(
-                    # 2 * self.config.output_hidden_size, 
-                    3072,  # HARDCODE, x_embedder from flux
-                    self.config.output_hidden_size
-                ),
-            )
-        # elif self.config.vae_projector_type == "linear":
-        # self.vae_projector = nn.Sequential(
-        #     nn.Linear(
-        #         self.config.vae_input_hidden_size,
-        #         self.config.output_hidden_size,
-        #     ),
-        # )
-        else:
-            raise ValueError(
-                f"Unknown vae_projector_type: {self.config.vae_projector_type}"
-            )
-
+        
     def _init_siglip_projector(self):
         """Initialize the denoise_projector for multi model input."""
+
         self.siglip_projector = nn.Sequential(
             nn.Linear(
                 1152,  # HARDCODE, out from siglip
@@ -90,20 +63,6 @@ class UnivaDenoiseTower(PreTrainedModel):
             ),
         )
 
-    def _init_convnext_projector(self):
-        """Initialize the denoise_projector for multi model input."""
-        self.convnext_projector = nn.Sequential(
-            nn.Linear(
-                1152,  # HARDCODE, out from convnext
-                4096 * 3,  # HARDCODE
-            ),
-            nn.SiLU(),
-            nn.Linear(
-                4096 * 3,  # HARDCODE
-                4096,  # HARDCODE, context_embedder from flux
-            ),
-        )
-        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -155,6 +114,7 @@ class UnivaDenoiseTower(PreTrainedModel):
 
             # print(f'hidden_states.shape, {hidden_states.shape}, encoder_hidden_states.shape, {encoder_hidden_states.shape}')
             # return self.fixed_flux_forward(
+            # print(f'hidden_states.shape: {hidden_states.shape}, encoder_hidden_states.shape: {encoder_hidden_states.shape}')
             return self.denoiser(
                 hidden_states=hidden_states,
                 timestep=timestep, # Note: timestep is in [0, 1]. It has been scaled by 1000 in the training script.

@@ -1,8 +1,10 @@
 import os
+import json
 import copy
 import math
 from typing import Any, Dict, Iterable, List, Optional, Union
 from safetensors.torch import save_file
+from huggingface_hub import save_torch_state_dict
 from diffusers.utils import (
     deprecate,
     is_torchvision_available,
@@ -42,6 +44,7 @@ class EMAModel:
         power: Union[float, int] = 2 / 3,
         model_cls: Optional[Any] = None,
         model_config: Dict[str, Any] = None,
+        weight_file_prefix: Optional[str] = None, 
         **kwargs,
     ):
         """
@@ -94,6 +97,8 @@ class EMAModel:
 
         self.model_cls = model_cls
         self.model_config = model_config
+
+        self.prefix = weight_file_prefix
 
     @classmethod
     def extract_ema_kwargs(cls, kwargs):
@@ -160,9 +165,11 @@ class EMAModel:
             t1 = time.perf_counter()
             print(f"[{t1:.4f}] after setattr config (耗时 {t1-t_start:.4f} 秒)")
 
-            self.model_config.save_pretrained(path)
-            # with open(os.path.join(path, "config.json"), "w") as f:
-            #     json.dump(self.model.config, f, indent=2)
+            if hasattr(self.model_config, 'save_pretrained'):
+                self.model_config.save_pretrained(path)
+            else:
+                with open(os.path.join(path, "config.json"), "w") as f:
+                    json.dump(self.model_config, f, indent=2)
             if hasattr(self.model, "generation_config"):
                 print(type(self.model.generation_config), self.model.generation_config)
                 self.model.generation_config.save_pretrained(path)
@@ -171,12 +178,26 @@ class EMAModel:
             t2 = time.perf_counter()
             print(f"[{t2:.4f}] self.model.save_config(path) (耗时 {t2-t1:.4f} 秒)")
 
-            torch.save(model_state_dict, os.path.join(path, "pytorch_model.bin"))
+            if self.prefix is not None:
+                self._save_pretrained_with_prefix(model_state_dict, path, self.prefix)
+            else:
+                torch.save(model_state_dict, os.path.join(path, "pytorch_model.bin"))
             t3 = time.perf_counter()      
             print(f"[{t3:.4f}] after save_pretrained (耗时 {t3-t2:.4f} 秒)")
 
             print(f"[{t3:.4f}] 总耗时 {t3-t_start:.4f} 秒")
         return model_state_dict
+
+    def _save_pretrained_with_prefix(self, state_dict, save_dir, prefix):
+        suffix = '{suffix}'
+        pattern = f"{prefix}{suffix}.safetensors"
+        save_torch_state_dict(
+            state_dict=state_dict,
+            save_directory=save_dir,
+            filename_pattern=pattern,
+            max_shard_size="5GB",
+            safe_serialization=True,
+        )
 
     def get_decay(self, optimization_step: int) -> float:
         """

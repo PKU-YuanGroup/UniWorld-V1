@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List
 
 
@@ -31,7 +31,7 @@ class TrainingConfig:
     logit_mean: float = 0.0
     logit_std: float = 1.0
     mode_scale: float = 1.29
-    max_grad_norm: float = 1.0
+    max_grad_norm: Optional[float] = None
     checkpointing_steps: int = 100
     checkpoints_total_limit: Optional[int] = 500
     drop_condition_rate: float = 0.0
@@ -44,7 +44,6 @@ class TrainingConfig:
     sigmas_as_weight: bool = False  # Used in Flux
 
     discrete_timestep: bool = True  # Used in Flux
-
 
     optimizer: str = 'adamw'  # ['adamw', 'prodigy']
 
@@ -59,6 +58,11 @@ class TrainingConfig:
     ema_deepspeed_config_file: Optional[str] = None
     ema_update_freq: int = 1
     ema_decay: float = 0.99
+
+    drop_lora_rate: float = 0.0
+    drop_lora_layer_wise: bool = False
+
+    ce_loss_weight: float = 1.0
 
 @dataclass
 class DatasetConfig:
@@ -157,6 +161,17 @@ class ModelConfig:
     compile_qwen2p5vl: bool = False
 
     ema_pretrained_lvlm_name_or_path: Optional[str] = None
+
+    lora_r: int = -1
+    lora_alpha: int = -1
+    lora_dropout: float = 0.0
+    lora_target_modules: Optional[List[str]] = field(
+        default_factory=lambda: ['q_proj', 'k_proj', 'v_proj', 'out_proj', 'fc1', 'fc2']
+    )
+
+    with_tune_pretrained_redux_mlp: bool = False
+    with_tune_aspect_ratio_embedder: bool = True
+
     
 @dataclass
 class UnivaTrainingDenoiseConfig:

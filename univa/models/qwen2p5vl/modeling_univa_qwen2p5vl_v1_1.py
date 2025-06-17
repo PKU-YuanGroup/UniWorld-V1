@@ -1,5 +1,5 @@
 from typing import Optional, List, Tuple, Union, Literal, Dict
-import torch._dynamo
+import copy
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -8,33 +8,34 @@ import torch.nn as nn
 from torch.nn import functional as F
 from torch.nn import CrossEntropyLoss
 from transformers import GenerationMixin
-from transformers.models.qwen2_vl.modeling_qwen2_vl import (
-    Qwen2VLModel,
-    Qwen2VLPreTrainedModel,
-    Qwen2VisionTransformerPretrainedModel, 
-    Qwen2VLCausalLMOutputWithPast
+from transformers.modeling_utils import restore_default_torch_dtype
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VLModel,
+    Qwen2_5_VLPreTrainedModel,
+    Qwen2_5_VisionTransformerPretrainedModel, 
+    Qwen2_5_VLCausalLMOutputWithPast
 )
-# from univa.models.modeling_univa_vision_tower import UnivaVisionTower
-# from univa.models.configuration_univa import UnivaConfig
-from univa.models.qwen2vl.configuration_univa_qwen2vl import UnivaQwen2VLConfig
-from univa.models.modeling_univa_denoise_tower import UnivaDenoiseTower
+from univa.models.qwen2p5vl.configuration_univa_qwen2p5vl import UnivaQwen2p5VLConfig
+from univa.models.modeling_univa_denoise_tower_v1_1 import UnivaDenoiseTower_V1_1
+from torch.utils.checkpoint import checkpoint
 
-class UnivaQwen2VLModel(Qwen2VLModel):
-    def __init__(self, config: UnivaQwen2VLConfig):
+
+class UnivaQwen2p5VLModel(Qwen2_5_VLModel):
+    def __init__(self, config: UnivaQwen2p5VLConfig):
         super().__init__(config)
         self.config = config
 
-class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
+class UnivaQwen2p5VLForConditionalGeneration_V1_1(Qwen2_5_VLPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
-    config_class = UnivaQwen2VLConfig
+    config_class = UnivaQwen2p5VLConfig
 
-    def __init__(self, config: UnivaQwen2VLConfig):
+    def __init__(self, config: UnivaQwen2p5VLConfig):
         super().__init__(config)
-        self.visual = Qwen2VisionTransformerPretrainedModel._from_config(config.vision_config)
+        self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(config.vision_config)
         print("visual init done")
-        self.model = UnivaQwen2VLModel(config)
+        self.model = UnivaQwen2p5VLModel(config)
         print("model init done")
-        self.denoise_tower = UnivaDenoiseTower(config.denoise_tower)
+        self.denoise_tower = UnivaDenoiseTower_V1_1(config.denoise_tower)
         print("denoise tower init done")
 
         self.vocab_size = config.vocab_size
@@ -45,6 +46,67 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
         # Initialize weights and apply final processing
         self.post_init()
 
+    @classmethod
+    @restore_default_torch_dtype
+    def from_config(cls, config, **kwargs):
+        """
+        All context managers that the model should be initialized under go here.
+
+        Args:
+            torch_dtype (`torch.dtype`, *optional*):
+                Override the default `torch.dtype` and load the model under this dtype.
+        """
+        # when we init a model from within another model (e.g. VLMs) and dispatch on FA2
+        # a warning is raised that dtype should be fp16. Since we never pass dtype from within
+        # modeling code, we can try to infer it here same way as done in `from_pretrained`
+        torch_dtype = kwargs.pop("torch_dtype", config.torch_dtype)
+        if isinstance(torch_dtype, str):
+            torch_dtype = getattr(torch, torch_dtype)
+
+        use_flash_attention_2 = kwargs.pop("use_flash_attention_2", False)
+
+        # override default dtype if needed
+        dtype_orig = None
+        if torch_dtype is not None:
+            dtype_orig = cls._set_default_torch_dtype(torch_dtype)
+
+        config = copy.deepcopy(config)  # We do not want to modify the config inplace in _from_config.
+
+        if config._attn_implementation_internal is not None:
+            # In this case, the config has been created with the attn_implementation set by the user, which we
+            # should respect.
+            attn_implementation = config._attn_implementation_internal
+        else:
+            attn_implementation = None
+
+        config._attn_implementation = kwargs.pop("attn_implementation", attn_implementation)
+        if not getattr(config, "_attn_implementation_autoset", False):
+            config = cls._autoset_attn_implementation(
+                config,
+                use_flash_attention_2=use_flash_attention_2,
+                check_device_map=False,
+                torch_dtype=torch_dtype,
+            )
+
+        # if is_deepspeed_zero3_enabled() and not _is_quantized and not _is_ds_init_called:
+        #     import deepspeed
+
+        #     logger.info("Detected DeepSpeed ZeRO-3: activating zero.init() for this model")
+        #     # this immediately partitions the model across all gpus, to avoid the overhead in time
+        #     # and memory copying it on CPU or each GPU first
+        #     init_contexts = [deepspeed.zero.Init(config_dict_or_path=deepspeed_config()), set_zero3_state()]
+        #     with ContextManagers(init_contexts):
+        #         model = cls(config, **kwargs)
+
+        # else:
+        model = cls(config, **kwargs)
+
+        # restore default dtype if it was modified
+        if dtype_orig is not None:
+            torch.set_default_dtype(dtype_orig)
+
+        return model
+    
     def get_denoise_embeds(
         self,
         input_ids: torch.LongTensor,
@@ -54,7 +116,6 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
         input_embeds = self(input_ids, images, image_position)[0]
         input_embeds = self.denoise_tower(input_embeds)
         return input_embeds
-
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -73,13 +134,14 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
 
     def get_decoder(self):
         return self.model
-    
+
     # @torch._dynamo.disable
     def get_rope_index(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
+        second_per_grid_ts: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -98,14 +160,21 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
             For vision and text embedding sequence, we calculate 3D rotary position embedding for vision part
             and 1D rotary position embedding for text part.
             Examples:
-                Assume we have a video input with 3 temporal patches, 2 height patches and 2 width patches.
+                Temporal (Time): 3 patches, representing different segments of the video in time.
+                Height: 2 patches, dividing each frame vertically.
+                Width: 2 patches, dividing each frame horizontally.
+                We also have some important parameters:
+                fps (Frames Per Second): The video's frame rate, set to 1. This means one frame is processed each second.
+                tokens_per_second: This is a crucial parameter. It dictates how many "time-steps" or "temporal tokens" are conceptually packed into a one-second interval of the video. In this case, we have 25 tokens per second. So each second of the video will be represented with 25 separate time points. It essentially defines the temporal granularity.
+                temporal_patch_size: The number of frames that compose one temporal patch. Here, it's 2 frames.
+                interval: The step size for the temporal position IDs, calculated as tokens_per_second * temporal_patch_size / fps. In this case, 25 * 2 / 1 = 50. This means that each temporal patch will be have a difference of 50 in the temporal position IDs.
                 input_ids: [V V V V V V V V V V V V T T T T T], here V is for vision.
-                vision temporal position_ids: [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+                vision temporal position_ids: [0, 0, 0, 0, 50, 50, 50, 50, 100, 100, 100, 100]
                 vision height position_ids: [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1]
                 vision width position_ids: [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
-                text temporal position_ids: [3, 4, 5, 6, 7]
-                text height position_ids: [3, 4, 5, 6, 7]
-                text width position_ids: [3, 4, 5, 6, 7]
+                text temporal position_ids: [101, 102, 103, 104, 105]
+                text height position_ids: [101, 102, 103, 104, 105]
+                text width position_ids: [101, 102, 103, 104, 105]
                 Here we calculate the text start position_ids as the max vision position_ids plus 1.
 
         Args:
@@ -116,6 +185,8 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                 The temporal, height and width of feature shape of each image in LLM.
             video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
                 The temporal, height and width of feature shape of each video in LLM.
+            second_per_grid_ts (`torch.Tensor` of shape `(num_videos)`, *optional*):
+                The time interval (in seconds) for each grid along the temporal dimension in the 3D position IDs.
             attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
                 Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
 
@@ -136,11 +207,16 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
             if attention_mask is None:
                 attention_mask = torch.ones_like(total_input_ids)
             position_ids = torch.ones(
-                3, input_ids.shape[0], input_ids.shape[1], dtype=input_ids.dtype, device=input_ids.device
+                3,
+                input_ids.shape[0],
+                input_ids.shape[1],
+                dtype=input_ids.dtype,
+                device=input_ids.device,
             )
             image_index, video_index = 0, 0
+            attention_mask = attention_mask.to(total_input_ids.device)
             for i, input_ids in enumerate(total_input_ids):
-                input_ids = input_ids[attention_mask[i].to(input_ids.device) == 1]
+                input_ids = input_ids[attention_mask[i] == 1]
                 image_nums, video_nums = 0, 0
                 vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
                 #################
@@ -169,15 +245,21 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                             image_grid_thw[image_index][1],
                             image_grid_thw[image_index][2],
                         )
+                        second_per_grid_t = 0
                         image_index += 1
                         remain_images -= 1
                         ed = ed_image
+
                     else:
                         t, h, w = (
                             video_grid_thw[video_index][0],
                             video_grid_thw[video_index][1],
                             video_grid_thw[video_index][2],
                         )
+                        if second_per_grid_ts is not None:
+                            second_per_grid_t = second_per_grid_ts[video_index]
+                        else:
+                            second_per_grid_t = 1.0
                         video_index += 1
                         remain_videos -= 1
                         ed = ed_video
@@ -191,7 +273,14 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                     llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
+                    range_tensor = torch.arange(llm_grid_t).view(-1, 1)
+                    expanded_range = range_tensor.expand(-1, llm_grid_h * llm_grid_w)
+
+                    time_tensor = expanded_range * second_per_grid_t * self.config.vision_config.tokens_per_second
+
+                    time_tensor_long = time_tensor.long()
+                    t_index = time_tensor_long.flatten()
+
                     h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
                     w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
                     llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
@@ -227,7 +316,6 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                 )
 
             return position_ids, mrope_position_deltas
-        
 
     # @torch.compile
     def forward_visual(self, pixel_values, grid_thw):
@@ -252,12 +340,14 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
         video_grid_thw: Optional[torch.LongTensor] = None,
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        second_per_grid_ts: Optional[torch.Tensor] = None,        
         output_type: Literal["lvlm", "denoise_model_pred", "denoise_embeds"] = "lvlm",
         denoiser_kwargs: Optional[Dict] = {},
         only_use_t5: bool = False,
         vlm_residual_image_factor: float = 0.0, 
         **kwargs,
-    ) -> Union[Tuple, Qwen2VLCausalLMOutputWithPast]:
+    ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
+        
         if not only_use_t5:
             if (
                 self.forward_denoiser
@@ -279,14 +369,15 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                 # print('image_grid_thw is list:', *[i.shape for i in image_grid_thw])
                 # image_grid_thw = torch.cat(image_grid_thw)
                 # print('image_grid_thw convert to tensor:', image_grid_thw.shape)
+
             if inputs_embeds is None:
                 inputs_embeds = self.model.embed_tokens(input_ids)
                 if pixel_values is not None:
-                    pixel_values = pixel_values.type(self.visual.get_dtype())
+                    pixel_values = pixel_values.type(self.visual.dtype)
                     #################################
                     # add these line
                     image_embeds = self.forward_visual(pixel_values, grid_thw=image_grid_thw)
-                    
+                                        
                     if self.config.shortcut_projector_type is not None:
                         shortcut_image_embeds_batch = image_embeds
                     else:
@@ -298,17 +389,17 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                         raise ValueError(
                             f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
                         )
-                    image_mask = (
-                        (input_ids == self.config.image_token_id)
-                        .unsqueeze(-1)
-                        .expand_as(inputs_embeds)
-                        .to(inputs_embeds.device)
-                    )
+
+                    mask = input_ids == self.config.image_token_id
+                    mask_unsqueezed = mask.unsqueeze(-1)
+                    mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                    image_mask = mask_expanded.to(inputs_embeds.device)
+
                     image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                     inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
                 if pixel_values_videos is not None:
-                    pixel_values_videos = pixel_values_videos.type(self.visual.get_dtype())
+                    pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                     video_embeds = self.forward_visual(pixel_values_videos, grid_thw=video_grid_thw)
                     n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
                     n_video_features = video_embeds.shape[0]
@@ -316,17 +407,18 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                         raise ValueError(
                             f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
                         )
-                    video_mask = (
-                        (input_ids == self.config.video_token_id)
-                        .unsqueeze(-1)
-                        .expand_as(inputs_embeds)
-                        .to(inputs_embeds.device)
-                    )
+
+                    mask = input_ids == self.config.video_token_id
+                    mask_unsqueezed = mask.unsqueeze(-1)
+                    mask_expanded = mask_unsqueezed.expand_as(inputs_embeds)
+                    video_mask = mask_expanded.to(inputs_embeds.device)
+
                     video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                     inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
                 if attention_mask is not None:
                     attention_mask = attention_mask.to(inputs_embeds.device)
+
 
                 shortcut_image_embeds = []
                 if pixel_values is not None and shortcut_image_embeds_batch is not None:
@@ -364,18 +456,25 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                     or (past_key_values is None or past_key_values.get_seq_length() == 0)
                 ):
                     position_ids, rope_deltas = self.get_rope_index(
-                        input_ids, image_grid_thw, video_grid_thw, attention_mask
+                        input_ids,
+                        image_grid_thw,
+                        video_grid_thw,
+                        second_per_grid_ts,
+                        attention_mask,
                     )
                     self.rope_deltas = rope_deltas
                 # then use the prev pre-calculated rope-deltas to get the correct position ids
                 else:
                     batch_size, seq_length, _ = inputs_embeds.shape
-                    delta = cache_position[0] + self.rope_deltas if cache_position is not None else 0
+                    delta = (
+                        (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                        if cache_position is not None
+                        else 0
+                    )
                     position_ids = torch.arange(seq_length, device=inputs_embeds.device)
                     position_ids = position_ids.view(1, -1).expand(batch_size, -1)
                     if cache_position is not None:  # otherwise `deltas` is an int `0`
                         delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-                        delta = delta.to(position_ids.device)
                     position_ids = position_ids.add(delta)
                     position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
@@ -391,9 +490,10 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                 return_dict=return_dict,
                 cache_position=cache_position,
             )
-        
+
             hidden_states = outputs[0]
-            
+
+
             
             if output_type.startswith("denoise"):
                 outputs = outputs[0]
@@ -421,27 +521,31 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
             ref_features_for_vlm = kwargs.pop('ref_features_for_vlm', None)
             siglip_hidden_states = kwargs.pop('siglip_hidden_states', None)
             if outputs is not None:
+                # outputs = self.denoise_tower.denoise_projector(outputs)
                 outputs = self.denoise_tower.denoise_projector(outputs)
                 if ref_features_for_vlm is not None:
+                    # outputs_ref_features = self.denoise_tower.vae_projector(ref_features_for_vlm)
                     outputs_ref_features = self.denoise_tower.vae_projector(ref_features_for_vlm)
                     outputs = torch.cat([outputs, outputs_ref_features], dim=1)
                 if siglip_hidden_states is not None:
+                    # siglip_hidden_states = self.denoise_tower.siglip_projector(siglip_hidden_states)
                     siglip_hidden_states = self.denoise_tower.siglip_projector(siglip_hidden_states)
                     indices_list = self.find_all_token_positions(input_ids, self.config.image_end_token_id)
                     # import ipdb;ipdb.set_trace()
-                    outputs = self._insert_img_to_vlm(outputs, siglip_hidden_states, indices_list)
+                    outputs, attention_mask = self._insert_img_to_vlm(outputs, attention_mask, siglip_hidden_states, indices_list)
                     # print(outputs.shape)
                 
 
             if output_type == "denoise_embeds":
                 # LVLM outputs -> MLP2 -> prompt_embeds
                 # with prompt_embeds, we can directly forward the denoiser.
-                return outputs
+                return outputs, self.lm_head(hidden_states)
             elif output_type == "denoise_model_pred":
                 # LM outputs -> MLP2 -> Denoiser -> model_pred
+                denoiser_kwargs['enc_attention_mask'] = attention_mask
                 return self.forward_denoise_tower(
                     outputs, **denoiser_kwargs
-                )
+                ), self.lm_head(hidden_states)
             else:
                 raise ValueError(f"Unknown output_type: {output_type}.")
 
@@ -466,7 +570,7 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
 
-        outputs = Qwen2VLCausalLMOutputWithPast(
+        return Qwen2_5_VLCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
@@ -474,13 +578,13 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
             attentions=outputs.attentions,
             rope_deltas=self.rope_deltas,
         )
-        return outputs
-    
+
     def forward_denoise_tower(self, outputs, **denoiser_kwargs):
         return self.denoise_tower(
             encoder_hidden_states=outputs, **denoiser_kwargs
         )
-
+    
+    # @torch._dynamo.disable
     def find_all_token_positions(self, input_ids, token_id):
         """
         返回一个列表，列表中每个元素是该 batch 中对应样本中 token_id 出现的位置索引（1D Tensor）
@@ -527,7 +631,7 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
                 return False
 
         return ForwardDenoiserContext(self)
-
+    
     def prepare_inputs_for_generation(
         self,
         input_ids,
@@ -541,6 +645,7 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
         pixel_values_videos=None,
         image_grid_thw=None,
         video_grid_thw=None,
+        second_per_grid_ts=None,
         **kwargs,
     ):
         # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
@@ -556,20 +661,22 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
+            second_per_grid_ts=second_per_grid_ts,
             use_cache=use_cache,
             **kwargs,
         )
 
-        # Qwen2-VL position_ids are prepareed with rope_deltas in forward
+        # Qwen2-5-VL position_ids are prepareed with rope_deltas in forward
         model_inputs["position_ids"] = None
 
-        if model_inputs["cache_position"][0] != 0:
+        if cache_position[0] != 0:
             model_inputs["pixel_values"] = None
             model_inputs["pixel_values_videos"] = None
 
         return model_inputs
-    
-    def _insert_img_to_vlm(self, vlm_feature, img_feature, indices_list):
+
+    @staticmethod
+    def _insert_img_to_vlm(vlm_feature, attention_mask, img_feature, indices_list):
         B, L, D = vlm_feature.shape
         assert img_feature.ndim == 3
         img_L = img_feature.shape[1]
@@ -579,14 +686,26 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
 
         img_mask = torch.zeros((B, max_new_len, 1), dtype=torch.bool, device=vlm_feature.device)
         for i, inds in enumerate(indices_list):
+            diff = max_new_len - L - len(inds) * img_L
             for j, pos in enumerate(inds):
-                # print(i, f'{j*img_L + pos} -> {(j+1)*img_L + pos}')
-                img_mask[i, j*img_L + pos: (j+1)*img_L + pos] = True
+                # print(i, f'{diff + j*img_L + pos} -> {diff + (j+1)*img_L + pos}')
+                img_mask[i, diff + j*img_L + pos: diff + (j+1)*img_L + pos] = True
 
         vlm_mask = ~img_mask
         for i, inds in enumerate(indices_list):
-            # print(i, f'{L+img_L*len(inds)}')
-            vlm_mask[i, L+img_L*len(inds): ] = False
+            # print(i, f'{max_new_len-L-img_L*len(inds)}')
+            vlm_mask[i, :max_new_len-L-img_L*len(inds)] = False
+
+        if attention_mask is not None:
+            attention_mask = torch.cat(
+                    [
+                        torch.zeros(
+                            (attention_mask.shape[0], max_new_len-L), 
+                            device=attention_mask.device, dtype=attention_mask.dtype
+                            ), 
+                        attention_mask
+                    ], dim=-1
+                )
 
         img_mask = img_mask.repeat(1, 1, D)
         assert torch.sum(img_mask) == img_feature.numel()
@@ -595,8 +714,8 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
         vlm_mask = vlm_mask.repeat(1, 1, D)
         assert torch.sum(vlm_mask) == vlm_feature.numel()
         new_vlm_feature.masked_scatter_(vlm_mask, vlm_feature.view(-1, D))
-        return new_vlm_feature
-
+        return new_vlm_feature, attention_mask
+    
     def _get_image_nums_and_video_nums(
         self,
         input_ids: Optional[torch.LongTensor],
@@ -720,4 +839,4 @@ class UnivaQwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMix
         return input_ids, model_kwargs
 
 
-# __all__ = ["Qwen2VLForConditionalGeneration", "Qwen2VLModel", "Qwen2VLPreTrainedModel"]
+# __all__ = ["Qwen2_5_VLForConditionalGeneration", "Qwen2_5_VLModel", "Qwen2_5_VLPreTrainedModel"]

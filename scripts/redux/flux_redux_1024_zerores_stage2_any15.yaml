@@ -1,34 +1,37 @@
 training_config:
   wandb_project: "redux"
-  wandb_name: "flux_redux_1024_split"
+  wandb_name: "flux_redux_1024_zerores_stage2_any15res_resume_ratioemb"
   seed: 203
-  output_dir: ./checkpoints/flux_redux_1024_split
-  logging_dir: ./logs/flux_redux_1024_split
+  output_dir: ./checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb
+  logging_dir: ./logs/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb
   max_train_steps: 500000
   optimizer: "adamw"
-  learning_rate: 1e-4
+  learning_rate: 1e-5
   adam_beta1: 0.9
   adam_beta2: 0.99
   adam_epsilon: 1e-8
   adam_weight_decay: 0.0
   mixed_precision: "bf16"
   report_to: "wandb"
-  gradient_checkpointing: true
-  num_train_epochs: 1
-  lr_scheduler: "constant"
-  lr_warmup_steps: 0
+  gradient_checkpointing: false
+  num_train_epochs: 5
+  lr_scheduler: "constant_with_warmup"
+  lr_warmup_steps: 10000
   lr_num_cycles: 1
   lr_power: 1.0
   resume_from_checkpoint: null
   validation_steps: 250
-  checkpointing_steps: 2000
+  checkpointing_steps: 1000
   drop_t5_rate: 1.0
   discrete_timestep: false
   mask_weight_type: 'log'
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
+  ema_deepspeed_config_file: scripts/accelerate_configs/zero3.json
+  ema_decay: 0.999
 
 model_config:
-  pretrained_lvlm_name_or_path: /mnt/data/checkpoints/SigLIP_MLP-FLUX.1-dev
+  pretrained_lvlm_name_or_path: /mnt/data/lb/6.5/UniWorld-V1/tests/REFACTOR_26k
+  ema_pretrained_lvlm_name_or_path: /mnt/data/lb/6.5/UniWorld-V1/tests/REFACTOR_26k/REDUX
   pretrained_denoiser_name_or_path: /mnt/data/checkpoints/black-forest-labs/FLUX.1-dev/
   pretrained_siglip_name_or_path: /mnt/data/checkpoints/google/siglip2-so400m-patch16-512
   guidance_scale: 1.0
@@ -40,21 +43,24 @@ model_config:
   pretrained_mlp3_path: null  
   only_tune_siglip_mlp: false
   with_tune_siglip_mlp: true
-  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/siglipv2-512.bin
+  with_tune_pretrained_redux_mlp: true
+  with_tune_aspect_ratio_embedder: true
+  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/tests/REFACTOR_26k/siglip_projector.bin
   joint_ref_feature: false
   only_use_t5: false
-  flux_train_layer_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56]
   vae_fp32: true
   compile_flux: false
   compile_qwen2p5vl: false
   only_tune_image_branch: false
+  lora_r: -1
 
 dataset_config:
   ocr_enhancer: false
   dataset_type: qwen2p5vl
   min_pixels: 200704
   max_pixels: 200704
-  data_txt: /mnt/data/lb/6.5/UniWorld-V1/it2i.txt
+  anyres: "any_15ratio"
+  data_txt: /mnt/data/lb/6.5/UniWorld-V1/short2048.txt
   batch_size: 1
   num_workers: 16
   height: 1024

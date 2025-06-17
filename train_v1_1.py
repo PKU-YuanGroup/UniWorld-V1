@@ -13,11 +13,12 @@ import json
 import deepspeed
 from accelerate import Accelerator, DistributedDataParallelKwargs, DistributedType
 from accelerate.utils import ProjectConfiguration, set_seed
-from univa.models import MODEL_TYPE, UnivaQwen2ForCausalLM
+from univa.models import MODEL_TYPE
 from univa.models.modeling_univa_denoise_tower import UnivaDenoiseTower
 from univa.dataset import DATASET_TYPE
+from univa.models.qwen2p5vl.modeling_univa_qwen2p5vl import UnivaQwen2p5VLForConditionalGeneration
 from univa.dataset.data_collator import DataCollator, pad_list_of_tensors
-from univa.utils.prompter import PROMPT_TYPE, Qwen2Prompter
+from univa.utils.prompter import PROMPT_TYPE, Qwen2p5VLPrompter
 from univa.utils.constant import SPACIAL_TOKEN, GENERATE_TOKEN
 from univa.utils.denoiser_prompt_embedding_flux import encode_prompt, _encode_prompt_with_t5
 from univa.utils.get_ocr import ocr_with_paddle, draw_boxes, get_ocr_result
@@ -40,6 +41,7 @@ from transformers import (
 from torchvision import transforms
 import torch
 import torch.nn.functional as F
+from torch.nn import CrossEntropyLoss
 from diffusers.optimization import get_scheduler
 from tqdm import tqdm
 from PIL import Image
@@ -56,6 +58,28 @@ from diffusers.training_utils import (
 from contextlib import nullcontext
 import wandb
 GB = 1024 * 1024 * 1024
+
+
+class EqualTokenWeightCrossEntropyLoss(CrossEntropyLoss):
+    def __init__(self, vocab_size, **kwargs):
+        super().__init__(**kwargs)
+        self.vocab_size = vocab_size
+
+    def __call__(self, logits, labels, **kwargs):
+        logits = logits.float()
+        # Shift so that tokens < n predict n
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        # Flatten the tokens
+        shift_logits = shift_logits.view(-1, self.vocab_size)
+        shift_labels = shift_labels.view(-1)
+        # Enable model parallelism
+        shift_labels = shift_labels.to(shift_logits.device)
+        loss_per_token = super().__call__(shift_logits, shift_labels, **kwargs)
+        num_items = torch.sum(shift_labels != -100)
+        loss = loss_per_token.sum() / num_items
+        return loss
+
 
 def get_trainable_params(
     layers_to_train: int = list(range(57)), num_transformer_blocks: int = 19, only_img_branch: bool = True
@@ -382,9 +406,12 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         args.model_config.pretrained_lvlm_name_or_path,
         attn_implementation=attn_implementation,
     )
+    vocab_size = lvlm_model.config.vocab_size
+    ce_loss_fct = EqualTokenWeightCrossEntropyLoss(vocab_size=vocab_size, reduction='none')
+
     accelerator.print(f'{lvlm_model}')
     lvlm_tokenizer, image_processor, processor = None, None, None
-    if dataset_type == 'qwen2vl' or dataset_type == 'qwen2p5vl':
+    if 'qwen2' in dataset_type:
         processor = AutoProcessor.from_pretrained(
             args.model_config.pretrained_lvlm_name_or_path,
         )
@@ -399,7 +426,12 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
             args.model_config.pretrained_lvlm_name_or_path,
         )
     else:
-         raise NotImplementedError(f"Only support dataset_type in ['qwen2vl', 'llava'], but found {dataset_type}")
+         raise NotImplementedError(f"Only support dataset_type in ['qwen2p5vl', 'llava'] but found {dataset_type}")
+
+    spacial_token = SPACIAL_TOKEN['qwen2p5vl_v1_1']
+    for k, v in spacial_token.items():
+        lvlm_tokenizer.add_tokens([v], special_tokens=True)
+        print(k, lvlm_tokenizer.convert_tokens_to_ids(v))
 
     siglip_processor, siglip_model = None, None
     if args.model_config.pretrained_siglip_name_or_path is not None:
@@ -940,9 +972,8 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                         accelerator.device, dtype=vae.dtype, non_blocking=True
                     )
 
-                input_ids = batch["input_ids"].to(
-                    accelerator.device, non_blocking=True
-                )
+                input_ids = batch["input_ids"].to(accelerator.device, non_blocking=True)
+                labels = batch["labels"].to(accelerator.device, non_blocking=True)
                 attention_mask = batch["attention_mask"].to(
                     accelerator.device, non_blocking=True
                 )
@@ -1000,8 +1031,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     ) * vae.config.scaling_factor
                     model_input = model_input
                     return model_input
-
-
 
                 denoiser_attention_mask = None
                 weight_mask = None
@@ -1174,7 +1203,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 else:
                     ref_features_for_vlm = None
 
-                model_pred = lvlm_model(
+                model_pred, vlm_logits = lvlm_model(
                     input_ids=input_ids,
                     attention_mask=attention_mask, 
                     pixel_values=pixel_values,
@@ -1195,6 +1224,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                         "joint_attention_kwargs": dict(attention_mask=denoiser_attention_mask) if denoiser_attention_mask is not None else {}
                     },
                 )
+                ce_loss = ce_loss_fct(vlm_logits, labels)
                 if args.model_config.joint_ref_feature and len(ref_pixel_values) > 0:
                     model_pred = model_pred[:, :noisy_model_input_len]
                 model_pred = FluxPipeline._unpack_latents(
@@ -1272,37 +1302,32 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     # import ipdb;ipdb.set_trace()
                 if weight_mask is not None:
                     assert args.dataset_config.batch_size != 1
-                    loss = loss.sum() / weight_mask.sum() / model_pred.shape[1]
+                    mse_loss = loss.sum() / weight_mask.sum() / model_pred.shape[1]
+                    loss = mse_loss + ce_loss * args.training_config.ce_loss_weight
                 else:
-                    loss = loss.mean()
+                    mse_loss = loss.mean()
+                    loss = mse_loss + ce_loss * args.training_config.ce_loss_weight
                 avg_loss_list = accelerator.gather(loss)
+                avg_ce_loss_list = accelerator.gather(ce_loss)
+                avg_mse_loss_list = accelerator.gather(mse_loss)
                 # if loss > 1.6:
                 #     print(f'HIGH LOSS!!! STEP[{global_step}]-RANK[{accelerator.process_index}] ERROR: loss={loss.detach().item()}, sigmas={sigmas}, prompts={prompts}, model_pred: {model_pred.shape}, max {model_pred.max()} min {model_pred.max()} mean {model_pred.max()} std {model_pred.max()}')
                 #     loss = loss * 0.0
                 accelerator.backward(loss)
-                # import ipdb;ipdb.set_trace()
-                if accelerator.sync_gradients:
-                    # print('before clip')
-                    # for name, param in lvlm_model.named_parameters():
-                    #     if param.requires_grad:
-                    #         if param.grad is not None:
-                    #             grad_norm = param.grad.data.norm(2).item()
-                    #             print(f"Layer: {name}, Grad Norm: {grad_norm}")
-                    #         else:
-                    #             print(f"Layer: {name}, Grad: None")
 
-                    accelerator.clip_grad_norm_(
-                        trainable_params, args.training_config.max_grad_norm
-                    )
-                    # print('after clip')
-                    # for name, param in lvlm_model.named_parameters():
-                    #     if param.requires_grad:
-                    #         if param.grad is not None:
-                    #             grad_norm = param.grad.data.norm(2).item()
-                    #             print(f"Layer: {name}, Grad Norm: {grad_norm}")
-                    #         else:
-                    #             print(f"Layer: {name}, Grad: None")
-                # import ipdb;ipdb.set_trace()
+                grad_norm = -1.0
+                if accelerator.sync_gradients:
+                    if args.training_config.max_grad_norm is not None:
+                        accelerator.clip_grad_norm_(
+                            trainable_params, args.training_config.max_grad_norm
+                        )
+                    if accelerator.distributed_type != DistributedType.DEEPSPEED:
+                        total_norm_sq = 0.0
+                        for p in lvlm_model.parameters():
+                            if p.grad is not None:
+                                param_norm = p.grad.data.norm(2)
+                                total_norm_sq += param_norm.item() ** 2
+                        grad_norm = math.sqrt(total_norm_sq)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -1528,8 +1553,12 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 logs = {
                     # "loss": loss.detach().item(),
                     "loss": avg_loss_list.mean().detach().item(), 
+                    "mse_loss": avg_mse_loss_list.mean().detach().item(), 
+                    "ce_loss": avg_ce_loss_list.mean().detach().item(), 
                     "lr": lr_scheduler.get_last_lr()[0],
                 }
+                if grad_norm >= 0.0:
+                    logs.update({'grad_norm': grad_norm})
                 if args.training_config.optimizer.lower() == "prodigy":
                     d = optimizer.param_groups[0]['d']
                     beta1, beta2 = optimizer.param_groups[0]['betas']
@@ -1556,9 +1585,9 @@ def log_validation(
     prompt: str,
     args: UnivaTrainingDenoiseConfig,
     vae: AutoencoderKL,
-    lvlm_model: UnivaQwen2ForCausalLM,
+    lvlm_model: UnivaQwen2p5VLForConditionalGeneration,
     tokenizer: PreTrainedTokenizer,
-    prompter: Qwen2Prompter,
+    prompter: Qwen2p5VLPrompter,
     weight_dtype: torch.dtype,
     negative_t5_prompt_embeds: Optional[torch.Tensor] = None,
     negative_pooled_prompt_embeds: Optional[torch.Tensor] = None,
@@ -1812,7 +1841,7 @@ def log_validation(
     if not only_use_t5:
         # TODO: use attention_mask
         attention_mask = input_ids.ne(tokenizer.pad_token_id)
-        lvlm_embeds = unwrapped_lvlm_model(
+        lvlm_embeds, _ = unwrapped_lvlm_model(
             input_ids=input_ids,
             attention_mask=attention_mask,  # image degrade
             pixel_values=pixel_values,
@@ -1849,8 +1878,7 @@ def log_validation(
                 width=width or args.dataset_config.width,
                 generator=generator,
                 latents=latents, 
-                num_inference_steps=28,
-                guidance_scale=4.0,
+                num_inference_steps=15,
                 latent_image_ids=latent_image_ids, 
                 latents_input_len=latents_input_len, 
             ).images[0]

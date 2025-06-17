@@ -26,9 +26,12 @@ training_config:
   discrete_timestep: false
   mask_weight_type: 'log'
   gradient_accumulation_steps: 1
+  ema_deepspeed_config_file: scripts/accelerate_configs/zero3.json
+  ema_decay: 0.999
 
 model_config:
   pretrained_lvlm_name_or_path: /mnt/data/checkpoints/UniVA/UniVA-Qwen2.5-VL-7B-Instruct-FLUX.1-dev-fp32
+  ema_pretrained_lvlm_name_or_path: /mnt/data/checkpoints/UniVA/UniVA-Qwen2.5-VL-7B-Instruct-FLUX.1-dev-fp32
   pretrained_denoiser_name_or_path: /mnt/data/checkpoints/black-forest-labs/FLUX.1-dev/
   guidance_scale: 1.0
   only_tune_mlp2: true
@@ -45,6 +48,7 @@ model_config:
   only_tune_image_branch: false
 
 dataset_config:
+  padding_side: "left"
   ocr_enhancer: false
   dataset_type: qwen2p5vl
   min_pixels: 200704
@@ -61,7 +65,7 @@ dataset_config:
   validation_image_path: assets/rec.jpg
 
   validation_iit2i_prompt: "this is a bus image and a on the back of the bus. <image> <image>"
-  validation_iit2i_path: ["/mnt/data/lb/Remake/UniWorld//assets/bus.png", "/mnt/data/lb/Remake/UniWorld//assets/dog.png"]
+  validation_iit2i_path: ["assets/bus.png", "assets/dog.png"]
   
   validation_cannyt2i_prompt: "Render an image where fine details and textures are filled in based on the provided canny lines, influenced by 'white and black dogs on snow covered ground during daytime'.\n<image>"
   validation_cannyt2i_path: assets/canny.jpg

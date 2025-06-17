@@ -1,0 +1,64 @@
+training_config:
+  wandb_project: "redux"
+  wandb_name: "flux_redux_1024_unshuffle_lr3_wu50k"
+  seed: 203
+  output_dir: ./checkpoints/flux_redux_1024_unshuffle_lr3_wu50k
+  logging_dir: ./logs/flux_redux_1024_unshuffle_lr3_wu50k
+  max_train_steps: 100000
+  optimizer: "adamw"
+  learning_rate: 1e-3
+  adam_beta1: 0.9
+  adam_beta2: 0.99
+  adam_epsilon: 1e-8
+  adam_weight_decay: 0.0
+  mixed_precision: "bf16"
+  report_to: "wandb"
+  gradient_checkpointing: false
+  num_train_epochs: 1
+  lr_scheduler: "constant_with_warmup"
+  lr_warmup_steps: 50000
+  lr_num_cycles: 1
+  lr_power: 1.0
+  resume_from_checkpoint: null
+  validation_steps: 500
+  checkpointing_steps: 2000
+  drop_t5_rate: 1.0
+  discrete_timestep: false
+  mask_weight_type: 'log'
+  gradient_accumulation_steps: 1
+
+model_config:
+  pretrained_lvlm_name_or_path: /mnt/data/checkpoints/SigLIP-MLP_Unshuffle_v1_2-FLUX.1-dev
+  pretrained_denoiser_name_or_path: /mnt/data/checkpoints/black-forest-labs/FLUX.1-dev/
+  pretrained_siglip_name_or_path: /mnt/data/checkpoints/google/siglip2-so400m-patch16-512
+  guidance_scale: 1.0
+  only_tune_mlp2: false
+  with_tune_mlp2: false
+  pretrained_mlp2_path: null
+  only_tune_mlp3: false
+  with_tune_mlp3: false
+  pretrained_mlp3_path: null  
+  only_tune_siglip_mlp: false
+  with_tune_siglip_mlp: true
+  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/siglipv2-512.bin
+  joint_ref_feature: false
+  only_use_t5: false
+  vae_fp32: true
+  compile_flux: false
+  compile_qwen2p5vl: false
+  only_tune_image_branch: false
+  lora_r: -1
+
+dataset_config:
+  ocr_enhancer: false
+  dataset_type: qwen2p5vl
+  min_pixels: 200704
+  max_pixels: 200704
+  data_txt: /mnt/data/lb/6.5/UniWorld-V1/short2048.txt
+  batch_size: 2
+  num_workers: 16
+  height: 1024
+  width: 1024
+  pin_memory: true
+  validation_redux_path: ["/mnt/data/lb/Remake/FlowWorld/assets/bus.png", "/mnt/data/lb/Remake/FlowWorld/assets/dog.png", "/mnt/data/lb/6.5/UniWorld-V1/assets/milk.png"]
+  

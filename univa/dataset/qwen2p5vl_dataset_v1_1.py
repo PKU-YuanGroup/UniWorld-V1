@@ -27,6 +27,9 @@ from PIL import Image
 from torchvision import io, transforms
 from typing import Optional
 
+current_file_path = os.path.abspath(__file__)
+current_dir = os.path.dirname(current_file_path)
+dummy_img_path = os.path.join(current_dir, 'dummy.jpg')
 
 def get_aspect_ratio(img):
     width, height = img.size
@@ -48,7 +51,7 @@ def has_same_resolution(img1, img2):
         img2 = Image.open(img2).convert('RGB')
     return img1.size == img2.size
 
-class Qwen2VLDataset(Dataset):
+class Qwen2p5VLDataset_V1_1(Dataset):
     def __init__(
         self,
         dataset_type: str,
@@ -72,24 +75,23 @@ class Qwen2VLDataset(Dataset):
         maxnum_per_data: int = -1, 
         notry: bool = False, 
     ):
-        assert dataset_type == 'qwen2vl' or dataset_type == 'qwen2p5vl', "dataset_type == 'qwen2vl' or dataset_type == 'qwen2p5vl'"
+        assert dataset_type in list(SPACIAL_TOKEN.keys())
+        self.transform = transform
+        self.processor = processor
+        self.tokenizer = processor.tokenizer
+        self.image_processor = processor.image_processor
+        self.SPACIAL_TOKEN = SPACIAL_TOKEN[dataset_type]
+        self._build_spacial_tokens()
+        self.generated_image_token = GENERATE_TOKEN
         with open(data_txt, "r") as f:
             self.datasets = [line.strip() for line in f.readlines()]
 
         self.data = []
         self._load_data(maxnum_per_data)
         
-        self.transform = transform
-        self.processor = processor
-        self.tokenizer = processor.tokenizer
         self.prompter = prompter
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
-        self.image_token = SPACIAL_TOKEN[dataset_type]['image_token']
-        self.image_begin_token = SPACIAL_TOKEN[dataset_type]['image_begin_token']
-        self.image_end_token = SPACIAL_TOKEN[dataset_type]['image_end_token']
-        self.generated_image_token = GENERATE_TOKEN
-        self.image_processor = processor.image_processor
         # self.factor = 4 if joint_ref_feature else 1
         self.factor = 2
 
@@ -105,27 +107,18 @@ class Qwen2VLDataset(Dataset):
         self.random_data = random_data
         self.notry = notry
 
+    def _build_spacial_tokens(self):
         # Add image token if not exists.
-        assert self.image_token in self.tokenizer.get_vocab()
-        self.image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_token)
-
-        self.image_begin_token_id = self.tokenizer.convert_tokens_to_ids(
-            self.image_begin_token
-        )
-        assert isinstance(self.image_begin_token_id, int), (
-            f"tokenizer miss image begin token `{self.image_begin_token}`"
-        )
-        self.image_end_token_id = self.tokenizer.convert_tokens_to_ids(
-            self.image_end_token
-        )
-        assert isinstance(self.image_end_token_id, int), (
-            f"tokenizer miss image end token `{self.image_end_token}`"
-        )
+        for k, v in self.SPACIAL_TOKEN.items():
+            setattr(self, k, v)
+            assert getattr(self, k) in self.tokenizer.get_vocab(), f'{k} not in tokenizer.get_vocab()'
+            setattr(self, k+'_id', self.tokenizer.convert_tokens_to_ids(getattr(self, k)))
+            assert isinstance(getattr(self, k+'_id'), int), f"tokenizer miss {k+'_id'} `{getattr(self, k)}`"
 
     def _load_data(self, maxnum_per_data=-1):
         for dataset in self.datasets:
-            image_root, json_file, need_weight = dataset.split(",")
-
+            image_root, json_file, need_weight, data_type = dataset.split(",")
+            assert data_type in ['gen', 'und']
             # Load json file
             with open(json_file, "r") as f:
                 data = json.load(f)
@@ -142,7 +135,12 @@ class Qwen2VLDataset(Dataset):
                 assert isinstance(line["image"], list), (
                     "`image` must be a str or a list."
                 )
-
+                ################################################################################
+                if len(line['image']) == 0:
+                    assert data_type == 'und'
+                    line['image'] = [dummy_img_path]
+                    line['conversations'][-1]['value'] = line['conversations'][-1]['value'] + self.generated_image_token
+                ################################################################################
                 # Convert image path to absolute path
                 line["need_weight"] = need_weight
                 line["image"] = [
@@ -227,6 +225,13 @@ class Qwen2VLDataset(Dataset):
         # Reformat the conversation to the format of prompter
         conversations = []
         prompt = ""
+        ################################################################################
+        is_und_data = False
+        if data['image'][0] == 'assets/dummy.jpg' and len(data['image']) == 1:
+            last_conv = data['conversations'][-1]['value'] + '<gen_image>'
+            data['conversations'][-1]['value'] = last_conv
+            is_und_data = True
+        ################################################################################
         for item in data["conversations"]:
             if item["from"] == "human":
                 role = self.prompter.user_role
@@ -236,6 +241,27 @@ class Qwen2VLDataset(Dataset):
             else:
                 raise ValueError(f"Unknown role: {item['from']}")
             conversations.append({"from": role, "value": item["value"]})
+        
+        # print('\n'.join([str(i) for i in conversations]))
+        num_turns = len(conversations)
+        assert num_turns
+        assert num_turns % 2 == 0
+        conversations_with_think = []
+        for idx in range(num_turns//2):
+            assert conversations[2*idx]['from'] == self.prompter.user_role
+            assert conversations[2*idx+1]['from'] == self.prompter.assistant_role
+            user_value = conversations[2*idx]["value"]
+            assistant_value = conversations[2*idx+1]["value"]
+            if self.think_begin_token in assistant_value or self.think_end_token in assistant_value:
+                assert self.think_begin_token in assistant_value and self.think_end_token in assistant_value
+                user_value = user_value + self.think_token
+            else:
+                user_value = user_value + self.no_think_token
+                assistant_value = f'{self.think_begin_token} {self.think_end_token} {assistant_value}'
+            conversations_with_think.append({"from": self.prompter.user_role, "value": user_value})
+            conversations_with_think.append({"from": self.prompter.assistant_role, "value": assistant_value})
+        conversations = conversations_with_think
+        # print('\n'.join([str(i) for i in conversations]))
         assert prompt != "", "prompt != ''"
         # The last turn instruction will be used for t5_embed
         prompt = prompt.replace('<image>', '').replace('\n', '')
@@ -291,7 +317,7 @@ class Qwen2VLDataset(Dataset):
                 )
                 has_generated_image = True
 
-            if self.ocr_enhancer and (self.image_token in item["prompt"]):
+            if self.ocr_enhancer and (self.image_token in item["prompt"]) and not is_und_data:
                 # print('item["prompt"]', item["prompt"])
                 if not has_generated_image:
                     num_img = item["prompt"].count(self.image_token)
@@ -362,6 +388,8 @@ class Qwen2VLDataset(Dataset):
         pil_pixel_values = image_dict['pil_pixel_values']
         siglip_pixel_values = image_dict['siglip_pixel_values']
         weights = image_dict['weights']
+        if len(weights) > 0 and is_und_data:
+            weights = torch.zeros_like(weights)
 
         input_ids, labels, image_position = self._process_image_token(
             input_ids,

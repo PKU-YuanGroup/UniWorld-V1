@@ -1,0 +1,108 @@
+training_config:
+  wandb_project: "uniworld"
+  wandb_name: "flux_qwen2p5vl_7b_vlm_stage1_512_adamw"
+  seed: 203
+  output_dir: ./checkpoints/flux_qwen2p5vl_7b_vlm_stage1_512_adamw
+  logging_dir: ./logs/flux_qwen2p5vl_7b_vlm_stage1_512_adamw
+  max_train_steps: 500000
+  optimizer: "adamw"
+  learning_rate: 5e-6
+  adam_beta1: 0.9
+  adam_beta2: 0.99
+  adam_epsilon: 1e-8
+  adam_weight_decay: 0.0
+  mixed_precision: "bf16"
+  report_to: "wandb"
+  gradient_checkpointing: true
+  num_train_epochs: 1
+  lr_scheduler: "constant"
+  lr_warmup_steps: 0
+  lr_num_cycles: 1
+  lr_power: 1.0
+  resume_from_checkpoint: null
+  validation_steps: 1000
+  checkpointing_steps: 2000
+  drop_t5_rate: 1.0
+  discrete_timestep: false
+  mask_weight_type: 'log'
+  gradient_accumulation_steps: 1
+  ema_deepspeed_config_file: scripts/accelerate_configs/zero3.json
+  ema_decay: 0.999
+
+model_config:
+  pretrained_lvlm_name_or_path: /mnt/data/checkpoints/UniVA/UniVA-Qwen2.5-VL-7B-Instruct-FLUX.1-dev-fp32
+  ema_pretrained_lvlm_name_or_path: /mnt/data/checkpoints/UniVA/UniVA-Qwen2.5-VL-7B-Instruct-FLUX.1-dev-fp32
+  pretrained_denoiser_name_or_path: /mnt/data/checkpoints/black-forest-labs/FLUX.1-dev/
+  pretrained_siglip_name_or_path: /mnt/data/checkpoints/google/siglip2-so400m-patch16-512
+  guidance_scale: 1.0
+  only_tune_mlp2: false
+  with_tune_mlp2: true
+  pretrained_mlp2_path: path/to/stage1/denoise_projector.bin
+  only_tune_mlp3: false
+  with_tune_mlp3: false
+  pretrained_mlp3_path: null  
+  only_tune_siglip_mlp: false
+  with_tune_siglip_mlp: true
+  pretrained_siglip_mlp_path: path/to/stage1/siglip_projector.bin
+  joint_ref_feature: false
+  only_use_t5: false
+  flux_train_layer_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56]
+  vae_fp32: true
+  compile_flux: false
+  compile_qwen2p5vl: true
+  only_tune_image_branch: true
+
+dataset_config:
+  padding_side: "left"
+  ocr_enhancer: false
+  dataset_type: qwen2p5vl
+  min_pixels: 200704
+  max_pixels: 200704
+  data_txt: /mnt/data/lb/Remake/UniWorld/data.txt
+  batch_size: 1
+  num_workers: 16
+  height: 512
+  width: 512
+  pin_memory: true
+  validation_t2i_prompt: "Generate an adorable golden retriever puppy playing in a sunny park, with fluffy fur, big round eyes, and a happy expression. The background should have green grass, some flowers, and a blue sky with white clouds."
+  
+  validation_it2i_prompt: "Simply reconstruct the original image with no enhancements. <image>"
+  validation_image_path: assets/rec.jpg
+
+  validation_iit2i_prompt: "this is a bus image and a on the back of the bus. <image> <image>"
+  validation_iit2i_path: ["assets/bus.png", "assets/dog.png"]
+  
+  validation_cannyt2i_prompt: "Render an image where fine details and textures are filled in based on the provided canny lines, influenced by 'white and black dogs on snow covered ground during daytime'.\n<image>"
+  validation_cannyt2i_path: assets/canny.jpg
+  
+  validation_it2canny_prompt: "Generate a Canny edge map for this image.\n<image>"
+  validation_it2canny_path: assets/canny_image.jpg
+  
+  validation_it2pose_prompt: "Create a pose map using OpenPose.<image>"
+  validation_it2pose_path: assets/pose_image.jpg
+  
+  validation_poset2i_prompt: "Create a person image that conforms to the input pose, with realistic anatomy and appearance related to 'Two individuals sit on a wooden bench in a park, with one person stretching their arms above their head and the other engrossed in their mobile device.'. <image>"
+  validation_poset2i_path: assets/pose.jpg
+  
+  validation_NIKEit2i_prompt: "Switch the product's color from black, black to white, white, making sure the transition is crisp and clear.\n<image>"
+  validation_NIKEit2i_path: assets/nike_src.jpg
+
+  validation_TRANSFERit2i_prompt: "Convert an image to Ghibli style. <image>"
+  validation_TRANSFERit2i_path: assets/bus.png
+
+  validation_EXTRACTit2i_prompt: "Extract the ny 94 printed cotton-jersey sweatpants from the person, ensuring the image only displays the item without any background distractions. <image>"
+  validation_EXTRACTit2i_path: assets/extract_src.jpg
+
+  validation_TRYONit2i_prompt: "Integrate the striped cotton sweater into the person's overall look, making it appear natural and stylish. <image>"
+  validation_TRYONit2i_path: assets/extract_dst.jpg
+
+  validation_REPLACEit2i_prompt: "replace motorcycle located in the lower center region of the image with a black bicycle <image>"
+  validation_REPLACEit2i_path: assets/replace_src.png
+
+  validation_SEGit2i_prompt: "Segment the giraffe from the background.\n<image>"
+  validation_SEGit2i_path: assets/seg_src.jpg
+
+  validation_DETit2i_prompt: "Please detect the vase accurately <image>"
+  validation_DETit2i_path: assets/det_src.jpg
+
+  

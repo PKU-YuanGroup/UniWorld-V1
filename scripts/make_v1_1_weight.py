@@ -3,8 +3,8 @@ import sys
 sys.path.append(".")
 from univa.models.qwen2p5vl.configuration_univa_qwen2p5vl import UnivaQwen2p5VLConfig
 from univa.models.configuration_univa_denoise_tower import UnivaDenoiseTowerConfig
-from univa.models.qwen2p5vl.modeling_univa_qwen2p5vl import (
-    UnivaQwen2p5VLForConditionalGeneration,
+from univa.models.qwen2p5vl.modeling_univa_qwen2p5vl_v1_1 import (
+    UnivaQwen2p5VLForConditionalGeneration_V1_1,
 )
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 from diffusers import SD3Transformer2DModel, FluxTransformer2DModel
@@ -18,8 +18,12 @@ def parse_args():
                         help='Path to the original FLUX checkpoint')
     parser.add_argument('--origin_qwenvl_ckpt_path', type=str, default='/mnt/data/checkpoints/Qwen/Qwen2.5-VL-7B-Instruct',
                         help='Path to the QwenVL base model')
-    parser.add_argument('--save_path', type=str, default='/mnt/data/checkpoints/UniWorld',
+    parser.add_argument('--save_path', type=str, default='/mnt/data/checkpoints/UniWorld_V1_1_Qwen2.5-VL-7B-Instruct_FLUX.1-dev',
                         help='Path to the save model')
+    # parser.add_argument('--origin_qwenvl_ckpt_path', type=str, default='/mnt/data/checkpoints/Qwen/Qwen2.5-VL-3B-Instruct',
+    #                     help='Path to the QwenVL base model')
+    # parser.add_argument('--save_path', type=str, default='/mnt/data/checkpoints/UniWorld_V1_1_Qwen2.5-VL-3B-Instruct_FLUX.1-dev',
+    #                     help='Path to the save model')
 
     return parser.parse_args()
 
@@ -44,7 +48,7 @@ config.denoise_tower = UnivaDenoiseTowerConfig(
 print(config)
 
 #######################################################################################
-model = UnivaQwen2p5VLForConditionalGeneration._from_config(
+model = UnivaQwen2p5VLForConditionalGeneration_V1_1._from_config(
     config, 
     torch_dtype=torch.float32,
     )

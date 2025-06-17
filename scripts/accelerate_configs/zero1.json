@@ -11,6 +11,11 @@
         "enabled": "auto"
     },
     "gradient_clipping": 1.0,
+    "communication_data_type": "fp32",
+    "gradient_accumulation_steps": "auto",
+    "train_batch_size": "auto",
+    "train_micro_batch_size_per_gpu": "auto",
+    "wall_clock_breakdown": false,
     "zero_optimization": {
         "stage": 1,
         "allgather_partitions": true,
@@ -19,11 +24,5 @@
         "reduce_scatter": true,
         "reduce_bucket_size": 2147483648,
         "contiguous_gradients": true
-    },
-    "communication_data_type": "fp32",
-    "gradient_accumulation_steps": 1,
-    "steps_per_print": 2000,
-    "train_batch_size": "auto",
-    "train_micro_batch_size_per_gpu": "auto",
-    "wall_clock_breakdown": false
+    }
 }

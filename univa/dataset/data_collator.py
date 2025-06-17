@@ -2,6 +2,8 @@ from typing import List, Dict
 from transformers import PreTrainedTokenizer
 import torch
 import torch.nn.functional as F
+import sys
+from univa.utils.constant import SPACIAL_TOKEN
 
 def pad_list_of_tensors(tensor_list, padding_value=0):
     # tensor_list: list of tensors, each of shape (b, c, h, w)
@@ -154,3 +156,24 @@ class DataCollator:
             "weights": weights, 
             "generated_image": generated_image, 
         }
+
+
+
+class DataCollator_V1_1(DataCollator):
+    def __init__(self, dataset_type: str, tokenizer: PreTrainedTokenizer, padding_side='right'):
+        super().__init__(tokenizer=tokenizer, padding_side=padding_side)
+        image_begin_token = SPACIAL_TOKEN[dataset_type]['image_begin_token']
+        self.image_begin_token_id = tokenizer.convert_tokens_to_ids(image_begin_token)
+
+    def __call__(self, *args, **kwargs) -> Dict:
+        batch = super().__call__(*args, **kwargs)
+        labels = batch.pop('labels')
+
+        mask_image_begin = (labels == self.image_begin_token_id)
+        # print("mask_image_begin:", mask_image_begin)  
+        # idxs_image = mask_image_begin.nonzero(as_tuple=True)
+        # print("positions of image_begin_token:", list(zip(*idxs_image)))
+        labels[mask_image_begin] = -100
+
+        batch.update({'labels': labels})
+        return batch
