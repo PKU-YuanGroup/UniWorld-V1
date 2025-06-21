@@ -23,7 +23,7 @@ from univa.utils.constant import SPACIAL_TOKEN, GENERATE_TOKEN
 from univa.utils.denoiser_prompt_embedding_flux import encode_prompt, _encode_prompt_with_t5
 from univa.utils.get_ocr import ocr_with_paddle, draw_boxes, get_ocr_result
 from univa.utils.flux_pipeline import FluxPipeline
-from univa.utils.create_ema import EMAModel, _z3_params_to_fetch
+from univa.utils.create_ema_zero3 import EMAModel_Zero3, _z3_params_to_fetch
 from univa.utils.anyres_util import dynamic_resize
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -272,8 +272,8 @@ def create_ema_model(
     if resume_checkpoint_path:
         ema_model_path = os.path.join(resume_checkpoint_path, "model_ema")
         if os.path.exists(ema_model_path):
-            ema_model = EMAModel.from_pretrained(ema_model_path, model_cls=model_cls)
-            accelerator.print(f'Successully resume EMAModel from {ema_model_path}')
+            ema_model = EMAModel_Zero3.from_pretrained(ema_model_path, model_cls=model_cls)
+            accelerator.print(f'Successully resume EMAModel_Zero3 from {ema_model_path}')
     else:
         # we load weights from original model instead of deepcopy
         # model = model_cls.from_config(model_config)
@@ -291,12 +291,12 @@ def create_ema_model(
         model.eval().requires_grad_(False)
         model.to(accelerator.device)
         # model.config.hidden_size = 4096
-        ema_model = EMAModel(
+        ema_model = EMAModel_Zero3(
             model, decay=args.training_config.ema_decay,
             model_cls=model_cls, model_config=model_config
             )
-        accelerator.print(f"EMAModel finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
-        accelerator.print(f'Successully deepcopy EMAModel from model')
+        accelerator.print(f"EMAModel_Zero3 finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
+        accelerator.print(f'Successully deepcopy EMAModel_Zero3 from model')
     # from deepspeed.runtime.zero import Init as DSZeroInit
     # with DSZeroInit(config=ds_config):
     ema_model.model, _, _, _ = deepspeed.initialize(model=ema_model.model, config_params=ds_config)
@@ -646,7 +646,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         
 
     # =======================================================================================================
-    # STEP 6: Create EMAModel
+    # STEP 6: Create EMAModel_Zero3
     if args.training_config.ema_deepspeed_config_file is not None:
         ema_model_state_dict = lvlm_model.state_dict()
         with open(args.training_config.ema_deepspeed_config_file, 'r') as f:

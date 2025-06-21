@@ -217,6 +217,20 @@ class ReduxImageEncoder(ModelMixin, ConfigMixin):
         )
         self.aspect_ratio_embedder = PixArtAlphaAspectEmbeddings(txt_in_features)
 
+        new_linear = self.siglip_projector[4]
+        assert isinstance(new_linear, nn.Linear)
+        if new_linear.weight.numel() > 0:  # from_pretrained will partition parameters when using deepspeed 
+            assert new_linear.weight.shape == (4096, 4096 * 4), f'new_linear.weight.shape: {new_linear.weight.shape}'
+            with torch.no_grad():
+                new_linear.weight.zero_()
+                for j in range(4096):
+                    base = j * 4
+                    new_linear.weight[j, base + 0] = 0.25
+                    new_linear.weight[j, base + 1] = 0.25
+                    new_linear.weight[j, base + 2] = 0.25
+                    new_linear.weight[j, base + 3] = 0.25
+                new_linear.bias.zero_()
+
     def forward(self, x: torch.Tensor, aspect_ratio: Optional[torch.Tensor] = None) -> ReduxImageEncoderOutput:
         projected_x = self.siglip_projector(x)
         if aspect_ratio is None:

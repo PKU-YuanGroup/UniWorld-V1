@@ -28,7 +28,7 @@ def _z3_params_to_fetch(param_list):
 
 
 # Adapted from diffusers-style ema https://github.com/huggingface/diffusers/blob/main/src/diffusers/training_utils.py#L263
-class EMAModel:
+class EMAModel_Zero3:
     """
     Exponential Moving Average of models weights
     """
@@ -44,7 +44,7 @@ class EMAModel:
         power: Union[float, int] = 2 / 3,
         model_cls: Optional[Any] = None,
         model_config: Dict[str, Any] = None,
-        weight_file_prefix: Optional[str] = None, 
+        weight_file_prefix: Optional[str] = '', 
         **kwargs,
     ):
         """
@@ -98,7 +98,7 @@ class EMAModel:
         self.model_cls = model_cls
         self.model_config = model_config
 
-        self.prefix = weight_file_prefix
+        self.weight_file_prefix = weight_file_prefix
 
     @classmethod
     def extract_ema_kwargs(cls, kwargs):
@@ -120,7 +120,7 @@ class EMAModel:
         return ema_kwargs
 
     @classmethod
-    def from_pretrained(cls, path, model_cls) -> "EMAModel":
+    def from_pretrained(cls, path, model_cls) -> "EMAModel_Zero3":
         config = model_cls.load_config(path)
         ema_kwargs = cls.extract_ema_kwargs(config)
         model = model_cls.from_pretrained(path)
@@ -160,8 +160,10 @@ class EMAModel:
 
             print(type(self.model_config), self.model_config)
             for k, v in state_dict.items():
-                setattr(self.model_config, k, v) 
-                # self.model.config[k] = v       
+                if isinstance(self.model_config, dict):
+                    self.model.config[k] = v      
+                else:
+                    setattr(self.model_config, k, v)  
             t1 = time.perf_counter()
             print(f"[{t1:.4f}] after setattr config (耗时 {t1-t_start:.4f} 秒)")
 
@@ -178,8 +180,8 @@ class EMAModel:
             t2 = time.perf_counter()
             print(f"[{t2:.4f}] self.model.save_config(path) (耗时 {t2-t1:.4f} 秒)")
 
-            if self.prefix is not None:
-                self._save_pretrained_with_prefix(model_state_dict, path, self.prefix)
+            if self.weight_file_prefix != '':
+                self._save_pretrained_with_prefix(model_state_dict, path, self.weight_file_prefix)
             else:
                 torch.save(model_state_dict, os.path.join(path, "pytorch_model.bin"))
             t3 = time.perf_counter()      
@@ -188,9 +190,9 @@ class EMAModel:
             print(f"[{t3:.4f}] 总耗时 {t3-t_start:.4f} 秒")
         return model_state_dict
 
-    def _save_pretrained_with_prefix(self, state_dict, save_dir, prefix):
+    def _save_pretrained_with_prefix(self, state_dict, save_dir, weight_file_prefix):
         suffix = '{suffix}'
-        pattern = f"{prefix}{suffix}.safetensors"
+        pattern = f"{weight_file_prefix}{suffix}.safetensors"
         save_torch_state_dict(
             state_dict=state_dict,
             save_directory=save_dir,
@@ -317,6 +319,7 @@ class EMAModel:
             "use_ema_warmup": self.use_ema_warmup,
             "inv_gamma": self.inv_gamma,
             "power": self.power,
+            "weight_file_prefix": self.weight_file_prefix, 
             "model": self.model.state_dict(),
         }
 
@@ -386,6 +389,10 @@ class EMAModel:
         if not isinstance(self.power, (float, int)):
             raise ValueError("Invalid power")
 
+        self.weight_file_prefix = state_dict.get("weight_file_prefix", self.weight_file_prefix)
+        if not isinstance(self.weight_file_prefix, (str)):
+            raise ValueError("Invalid weight_file_prefix")
+
         model_state_dict = state_dict.get("model", None)
         if model_state_dict is not None:
             self.model.load_state_dict(model_state_dict)
@@ -448,12 +455,12 @@ if __name__ == "__main__":
         # print('load_state_dict')
         # print('after model.device', model.device)
         accelerator.print(f"load_state_dict finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
-        ema_model = EMAModel(
+        ema_model = EMAModel_Zero3(
             model, decay=0.99,
             model_cls=model_cls, model_config=model_config
             )
-        accelerator.print(f"EMAModel finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
-        accelerator.print(f'Successully deepcopy EMAModel from model')
+        accelerator.print(f"EMAModel_Zero3 finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
+        accelerator.print(f'Successully deepcopy EMAModel_Zero3 from model')
 
         ema_model.model, _, _, _ = deepspeed.initialize(model=ema_model.model, config_params=ds_config)
         accelerator.print(f"deepspeed.initialize finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")

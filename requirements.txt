@@ -24,7 +24,7 @@ megfile
 torchdiffeq
 datasets
 protobuf==3.20.2
-deepspeed==0.14.5; sys_platform != 'win32'
+deepspeed==0.16.5; sys_platform != 'win32'
 ninja
 wandb==0.19.8
 prodigyopt
@@ -36,5 +36,3 @@ starlette==0.40.0
 torch>=2.5.1
 torchvision>=0.20.1
 huggingface_hub
-triton ; sys_platform != 'win32'
-triton-windows ; sys_platform == 'win32'

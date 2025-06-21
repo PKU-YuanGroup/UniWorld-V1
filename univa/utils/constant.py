@@ -10,7 +10,7 @@ SPACIAL_TOKEN = {
         'image_begin_token': '<|vision_start|>', 
         'image_end_token': '<|vision_end|>', 
         'think_begin_token': '<think_begin>', 
-        'think_end_token': '</think_end>', 
+        'think_end_token': '<think_end>', 
         'think_token': '<think>', 
         'no_think_token': '<no_think>', 
     }, 

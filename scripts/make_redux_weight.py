@@ -13,7 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--origin_flux_ckpt_path', type=str, default='/mnt/data/checkpoints/black-forest-labs/FLUX.1-dev',
                         help='Path to the original FLUX checkpoint')
-    parser.add_argument('--save_path', type=str, default='/mnt/data/checkpoints/SigLIP-MLP_Unshuffle-FLUX.1-dev',
+    parser.add_argument('--save_path', type=str, default='/mnt/data/checkpoints/UniWorld-V1.1-Redux',
                         help='Path to the save model')
 
     return parser.parse_args()

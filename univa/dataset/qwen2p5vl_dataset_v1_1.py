@@ -227,7 +227,7 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         prompt = ""
         ################################################################################
         is_und_data = False
-        if data['image'][0] == 'assets/dummy.jpg' and len(data['image']) == 1:
+        if data['image'][0] == dummy_img_path and len(data['image']) == 1:
             last_conv = data['conversations'][-1]['value'] + '<gen_image>'
             data['conversations'][-1]['value'] = last_conv
             is_und_data = True
@@ -252,16 +252,20 @@ class Qwen2p5VLDataset_V1_1(Dataset):
             assert conversations[2*idx+1]['from'] == self.prompter.assistant_role
             user_value = conversations[2*idx]["value"]
             assistant_value = conversations[2*idx+1]["value"]
+            # 如果answer里面有think_begin_token和think_end_token（必须同时有），表示有think内容
+            # 那前面的question就加一个think_token
             if self.think_begin_token in assistant_value or self.think_end_token in assistant_value:
                 assert self.think_begin_token in assistant_value and self.think_end_token in assistant_value
-                user_value = user_value + self.think_token
+                user_value = f'{user_value} {self.think_token}'
+            # 否则加一个no_think_token，并且answer直接think_begin_token完就是think_end_token，没有真的think内容
+            # 注意数据集的非cot数据的answer不应该有think_begin_tokenthink_end_token，否则会误判上面
             else:
-                user_value = user_value + self.no_think_token
+                user_value = f'{user_value} {self.no_think_token}'
                 assistant_value = f'{self.think_begin_token} {self.think_end_token} {assistant_value}'
             conversations_with_think.append({"from": self.prompter.user_role, "value": user_value})
             conversations_with_think.append({"from": self.prompter.assistant_role, "value": assistant_value})
         conversations = conversations_with_think
-        # print('\n'.join([str(i) for i in conversations]))
+        print('\n'.join([str(i) for i in conversations]))
         assert prompt != "", "prompt != ''"
         # The last turn instruction will be used for t5_embed
         prompt = prompt.replace('<image>', '').replace('\n', '')
@@ -388,8 +392,11 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         pil_pixel_values = image_dict['pil_pixel_values']
         siglip_pixel_values = image_dict['siglip_pixel_values']
         weights = image_dict['weights']
-        if len(weights) > 0 and is_und_data:
+        if is_und_data:
+            _, weights = get_weight_mask(pil_pixel_values, prompt, self.mask_weight_type, 'false')
+            print('is_und_data')
             weights = torch.zeros_like(weights)
+            assert torch.all(weights == 0.0)
 
         input_ids, labels, image_position = self._process_image_token(
             input_ids,
@@ -537,11 +544,14 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         pil_pixel_values = pil_pixel_values + pil_pixel_values_last
         
         if mask_weight_type is not None:
+            print('load_image mask_weight_type is not None')
             _, weights = get_weight_mask(pil_pixel_values, prompt, mask_weight_type, need_weight)
             if need_weight.lower() == 'false':
                 assert torch.all(weights == 1)
         else:
-            weights = []
+            print('load_image mask_weight_type is None')
+            _, weights = get_weight_mask(pil_pixel_values, prompt, mask_weight_type, 'false')
+            assert torch.all(weights == 1.0)
         return {
             'pixel_values': pixel_values, 
             'image_grid_thw': image_grid_thw, 
@@ -589,12 +599,28 @@ class Qwen2p5VLDataset_V1_1(Dataset):
                 ],
                 dim=1,
             )
+            # if labels is not None:
+            #     labels = torch.cat(
+            #         [
+            #             labels[:, :adjusted_idx],
+            #             labels.new_full(
+            #                 # (1, 1), image_begin_token_id
+            #                 (1, 1), -100  # do NOT need boi as label in question
+            #             ),  # Make begin token as label
+            #             labels.new_full((1, image_token_length), -100),
+            #             labels.new_full((1, 1), -100),
+            #             labels[:, adjusted_idx + 1 :],
+            #         ],
+            #         dim=1,
+            #     )
+
             if labels is not None:
+                begin_token_label = -100 if labels[0, adjusted_idx].item() == -100 else image_begin_token_id
                 labels = torch.cat(
                     [
                         labels[:, :adjusted_idx],
                         labels.new_full(
-                            (1, 1), image_begin_token_id
+                            (1, 1), begin_token_label
                         ),  # Make begin token as label
                         labels.new_full((1, image_token_length), -100),
                         labels.new_full((1, 1), -100),

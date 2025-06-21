@@ -1,12 +1,12 @@
 training_config:
   wandb_project: "redux"
-  wandb_name: "flux_redux_1024_unshuffle_lr3_wu50k"
-  seed: 203
-  output_dir: ./checkpoints/flux_redux_1024_unshuffle_lr3_wu50k
-  logging_dir: ./logs/flux_redux_1024_unshuffle_lr3_wu50k
-  max_train_steps: 100000
+  wandb_name: "flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256"
+  seed: 1234
+  output_dir: ./checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256
+  logging_dir: ./logs/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256
+  max_train_steps: 500000
   optimizer: "adamw"
-  learning_rate: 1e-3
+  learning_rate: 1e-4
   adam_beta1: 0.9
   adam_beta2: 0.99
   adam_epsilon: 1e-8
@@ -14,21 +14,23 @@ training_config:
   mixed_precision: "bf16"
   report_to: "wandb"
   gradient_checkpointing: false
-  num_train_epochs: 1
+  num_train_epochs: 5
   lr_scheduler: "constant_with_warmup"
-  lr_warmup_steps: 50000
+  lr_warmup_steps: 10000
   lr_num_cycles: 1
   lr_power: 1.0
-  resume_from_checkpoint: null
-  validation_steps: 500
-  checkpointing_steps: 2000
+  resume_from_checkpoint: 'latest'
+  validation_steps: 250
+  checkpointing_steps: 1000
   drop_t5_rate: 1.0
   discrete_timestep: false
   mask_weight_type: 'log'
   gradient_accumulation_steps: 1
+  ema_siglip_lora: true
+  ema_decay: 0.999
 
 model_config:
-  pretrained_lvlm_name_or_path: /mnt/data/checkpoints/SigLIP-MLP_Unshuffle_v1_2-FLUX.1-dev
+  pretrained_lvlm_name_or_path: /mnt/data/checkpoints/UniWorld-V1.1-Redux
   pretrained_denoiser_name_or_path: /mnt/data/checkpoints/black-forest-labs/FLUX.1-dev/
   pretrained_siglip_name_or_path: /mnt/data/checkpoints/google/siglip2-so400m-patch16-512
   guidance_scale: 1.0
@@ -39,23 +41,26 @@ model_config:
   with_tune_mlp3: false
   pretrained_mlp3_path: null  
   only_tune_siglip_mlp: false
-  with_tune_siglip_mlp: true
-  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/siglipv2-512.bin
+  with_tune_siglip_mlp: false
+  with_tune_pretrained_redux_mlp: false
+  with_tune_aspect_ratio_embedder: false
+  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb/checkpoint-17000/redux_ema_sftr/diffusion_pytorch_model.safetensors
   joint_ref_feature: false
   only_use_t5: false
   vae_fp32: true
   compile_flux: false
   compile_qwen2p5vl: false
   only_tune_image_branch: false
-  lora_r: -1
+  lora_r: 256
 
 dataset_config:
   ocr_enhancer: false
   dataset_type: qwen2p5vl
   min_pixels: 200704
   max_pixels: 200704
-  data_txt: /mnt/data/lb/6.5/UniWorld-V1/short2048.txt
-  batch_size: 2
+  anyres: "any_15ratio"
+  data_txt: /mnt/data/lb/6.5/UniWorld-V1/short1536.txt
+  batch_size: 1
   num_workers: 16
   height: 1024
   width: 1024

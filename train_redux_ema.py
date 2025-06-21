@@ -24,8 +24,9 @@ from univa.utils.constant import SPACIAL_TOKEN, GENERATE_TOKEN
 from univa.utils.denoiser_prompt_embedding_flux import encode_prompt, _encode_prompt_with_t5
 from univa.utils.get_ocr import ocr_with_paddle, draw_boxes, get_ocr_result
 from univa.utils.flux_pipeline import FluxPipeline
-from univa.utils.create_ema import EMAModel, _z3_params_to_fetch
+from univa.utils.create_ema_zero3 import EMAModel_Zero3, _z3_params_to_fetch
 from univa.utils.anyres_util import dynamic_resize
+from univa.utils.create_ema_siglip_lora import EMAModel_SigLIP_LoRA
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from transformers.integrations import HfDeepSpeedConfig
@@ -39,10 +40,12 @@ from transformers import (
     AutoTokenizer,
     AutoProcessor, 
 )
+from transformers import SiglipImageProcessor, SiglipVisionModel
 from torchvision import transforms
 import torch
 import torch.nn.functional as F
 from diffusers.optimization import get_scheduler
+from peft import PeftModel, LoraConfig, get_peft_model
 from tqdm import tqdm
 from PIL import Image
 from diffusers import (
@@ -311,8 +314,8 @@ def create_ema_model(
     if resume_checkpoint_path:
         ema_model_path = os.path.join(resume_checkpoint_path, "redux_ema")
         if os.path.exists(ema_model_path):
-            ema_model = EMAModel.from_pretrained(ema_model_path, model_cls=model_cls)
-            accelerator.print(f'Successully resume EMAModel from {ema_model_path}')
+            ema_model = EMAModel_Zero3.from_pretrained(ema_model_path, model_cls=model_cls)
+            accelerator.print(f'Successully resume EMAModel_Zero3 from {ema_model_path}')
     else:
         # we load weights from original model instead of deepcopy
         # model = model_cls.from_config(model_config)
@@ -330,13 +333,13 @@ def create_ema_model(
         model.eval().requires_grad_(False)
         model.to(accelerator.device)
         # model.config.hidden_size = 4096
-        ema_model = EMAModel(
+        ema_model = EMAModel_Zero3(
             model, decay=args.training_config.ema_decay,
             model_cls=model_cls, model_config=model_config, 
             weight_file_prefix=weight_file_prefix, 
             )
-        accelerator.print(f"EMAModel finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
-        accelerator.print(f'Successully deepcopy EMAModel from model')
+        accelerator.print(f"EMAModel_Zero3 finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
+        accelerator.print(f'Successully deepcopy EMAModel_Zero3 from model')
     # from deepspeed.runtime.zero import Init as DSZeroInit
     # with DSZeroInit(config=ds_config):
     ema_model.model, _, _, _ = deepspeed.initialize(model=ema_model.model, config_params=ds_config)
@@ -386,11 +389,13 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         if args.training_config.resume_from_checkpoint != "latest":
             path = os.path.basename(args.training_config.resume_from_checkpoint)
         else:
-            # Get the mos recent checkpoint
-            dirs = os.listdir(args.training_config.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
+            path = None
+            if os.path.exists(args.training_config.output_dir):
+                # Get the mos recent checkpoint
+                dirs = os.listdir(args.training_config.output_dir)
+                dirs = [d for d in dirs if d.startswith("checkpoint")]
+                dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+                path = dirs[-1] if len(dirs) > 0 else None
 
         if path is None:
             accelerator.print(
@@ -419,7 +424,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     lvlm_tokenizer = None
 
     siglip_processor, siglip_model = None, None
-    from transformers import SiglipImageProcessor, SiglipVisionModel
     siglip_processor = SiglipImageProcessor.from_pretrained(
         args.model_config.pretrained_siglip_name_or_path
         )
@@ -488,14 +492,22 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     siglip_model.requires_grad_(False)
 
     if args.model_config.lora_r > 0:
-        from peft import LoraConfig, get_peft_model
         lora_config = LoraConfig(
             r=args.model_config.lora_r,
             lora_alpha=args.model_config.lora_alpha if args.model_config.lora_alpha > 0 else args.model_config.lora_r,         
             target_modules=list(args.model_config.lora_target_modules),
             lora_dropout=args.model_config.lora_dropout,
         )   
-        siglip_model = get_peft_model(siglip_model, lora_config)
+        if args.model_config.pretrained_lora_siglip_name_or_path is None:
+            siglip_model = get_peft_model(siglip_model, lora_config)
+        else:
+            siglip_model = PeftModel.from_pretrained(siglip_model, args.model_config.pretrained_lora_siglip_name_or_path)
+            lora_target_modules = list(args.model_config.lora_target_modules)
+            for name, param in siglip_model.named_parameters():
+                if any(target in name for target in lora_target_modules) and '.lora_' in name.lower():
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
         trainable_params = [p for p in siglip_model.parameters() if p.requires_grad]
         accelerator.print(f"Number of trainable LoRA params: {sum(p.numel() for p in trainable_params):,}")
         accelerator.print(f"Total params in siglip_model: {sum(p.numel() for p in siglip_model.parameters()):,}")
@@ -504,9 +516,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     if args.training_config.gradient_checkpointing:
         lvlm_model.denoiser.enable_gradient_checkpointing()
 
-    # if args.dataset_config.anyres == 'any_1ratio':
-    #     siglip_model = torch.compile(siglip_model)
-    #     vae = torch.compile(vae)
+    if args.dataset_config.anyres == 'any_1ratio':
+        siglip_model = torch.compile(siglip_model)
+        vae = torch.compile(vae)
     joint_model = JointModel(args, lvlm_model, siglip_model)
 
     # Setup model saving and loading
@@ -515,9 +527,10 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
             for i, model in enumerate(models):
                 if isinstance(accelerator.unwrap_model(model).lvlm_model, UnivaDenoiseTower_V1_1) or isinstance(accelerator.unwrap_model(model).siglip_model, SiglipVisionModel):
                     if isinstance(accelerator.unwrap_model(model).lvlm_model, UnivaDenoiseTower_V1_1):
-                        accelerator.unwrap_model(model).lvlm_model.save_pretrained(
-                            os.path.join(output_dir, "univa"),
-                        )
+                        if args.model_config.lora_r <= 0:  # lora tuning that we do not need saveing the whole model
+                            accelerator.unwrap_model(model).lvlm_model.save_pretrained(
+                                os.path.join(output_dir, "univa"),
+                            )
                         accelerator.unwrap_model(model).lvlm_model.siglip_projector.save_pretrained(
                             os.path.join(output_dir, "redux"),
                         )
@@ -533,6 +546,13 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     weights.pop()
         if args.training_config.ema_deepspeed_config_file is not None:
             ema_model.save_pretrained(os.path.join(output_dir, "redux_ema"))
+        if accelerator.is_main_process:
+            if args.training_config.ema_siglip_lora and args.model_config.lora_r > 0:
+                ema_siglip_lora.save_pretrained(
+                    os.path.join(output_dir, "siglip_lora_ema"), 
+                    args.model_config.pretrained_siglip_name_or_path, 
+                    lora_config,
+                    )
 
     def load_model_hook(models, input_dir):
         for _ in range(len(models)):
@@ -540,16 +560,20 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
             
             if isinstance(accelerator.unwrap_model(model).lvlm_model, UnivaDenoiseTower_V1_1) or isinstance(accelerator.unwrap_model(model).siglip_model, SiglipVisionModel):
                 if isinstance(accelerator.unwrap_model(model).lvlm_model, UnivaDenoiseTower_V1_1):
-                    load_model = UnivaDenoiseTower_V1_1.from_pretrained(
-                        input_dir, subfolder="univa", 
-                        attn_implementation=attn_implementation,
-                    )
-                    model.lvlm_model.load_state_dict(load_model.state_dict())
-                    del load_model
+                    if os.path.exists(os.path.join(input_dir, 'univa')):
+                        load_model = UnivaDenoiseTower_V1_1.from_pretrained(
+                            input_dir, subfolder="univa", 
+                            attn_implementation=attn_implementation,
+                        )
+                        model.lvlm_model.load_state_dict(load_model.state_dict())
+                        del load_model
                 if isinstance(accelerator.unwrap_model(model).siglip_model, SiglipVisionModel):
                     if args.model_config.lora_r > 0:
-                        from peft import PeftModel
-                        load_model = PeftModel.from_pretrained(siglip_model, os.path.join(input_dir, 'siglip_lora'))
+                        siglip_model_bak = SiglipVisionModel.from_pretrained(
+                            args.model_config.pretrained_siglip_name_or_path, 
+                            attn_implementation=attn_implementation,
+                            )
+                        load_model = PeftModel.from_pretrained(siglip_model_bak, os.path.join(input_dir, 'siglip_lora'))
                         model.siglip_model.load_state_dict(load_model.state_dict())
                         del load_model
             else:
@@ -612,14 +636,19 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         if 'siglip_projector' in name:
             param.requires_grad_(False)
 
-
     if args.model_config.pretrained_siglip_mlp_path is not None:
-        pretrained_siglip_mlp = torch.load(args.model_config.pretrained_siglip_mlp_path)
-        pretrained_siglip_mlp = {k.replace('denoise_tower.', ''): v for k, v in pretrained_siglip_mlp.items()}
+        if args.model_config.pretrained_siglip_mlp_path.endswith('.safetensors'):
+            from safetensors.torch import load_file
+            pretrained_siglip_mlp = load_file(args.model_config.pretrained_siglip_mlp_path)
+            joint_model.lvlm_model.siglip_projector.load_state_dict(pretrained_siglip_mlp, strict=True)
+        else:
+            pretrained_siglip_mlp = torch.load(args.model_config.pretrained_siglip_mlp_path)
+            pretrained_siglip_mlp = {k.replace('denoise_tower.', ''): v for k, v in pretrained_siglip_mlp.items()}
+            msg = joint_model.lvlm_model.load_state_dict(pretrained_siglip_mlp, strict=False)
+            assert len(msg[1]) == 0, msg
         if accelerator.is_main_process:
             accelerator.print(f'Load {[k for k in pretrained_siglip_mlp.keys()]} from {args.model_config.pretrained_siglip_mlp_path}')
-        msg = joint_model.lvlm_model.load_state_dict(pretrained_siglip_mlp, strict=False)
-        assert len(msg[1]) == 0, msg
+            
 
     if args.model_config.only_tune_siglip_mlp:
         joint_model.lvlm_model.requires_grad_(False)
@@ -658,7 +687,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
 
 
     # =======================================================================================================
-    # STEP 6: Create EMAModel
+    # STEP 6: Create EMAModel_Zero3
     if args.training_config.ema_deepspeed_config_file is not None:
         ema_model_state_dict = joint_model.lvlm_model.state_dict()
         with open(args.training_config.ema_deepspeed_config_file, 'r') as f:
@@ -673,6 +702,40 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         accelerator.print(f"Load ema model finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
     # =======================================================================================================
 
+    # =======================================================================================================
+    # STEP 7: Create EMAModel for SigLIP_LoRA
+    is_ema_siglip_lora = False
+    if args.training_config.ema_siglip_lora and args.model_config.lora_r > 0:
+        if resume_checkpoint_path is None:
+            ema_siglip_lora = SiglipVisionModel.from_pretrained(
+                args.model_config.pretrained_siglip_name_or_path, 
+                attn_implementation=attn_implementation,
+                )
+            if args.model_config.ema_pretrained_lora_siglip_name_or_path:
+                ema_siglip_lora = PeftModel.from_pretrained(
+                    ema_siglip_lora, args.model_config.ema_pretrained_lora_siglip_name_or_path
+                    )
+            else:
+                ema_siglip_lora = get_peft_model(ema_siglip_lora, lora_config)
+            ema_siglip_lora = EMAModel_SigLIP_LoRA(
+                ema_siglip_lora.parameters(), decay=args.training_config.ema_decay, 
+                model_cls=PeftModel, model_config=ema_siglip_lora.config
+                )
+
+            if args.model_config.ema_pretrained_lora_siglip_name_or_path is not None:
+                if os.path.exists(os.path.join(args.model_config.ema_pretrained_lora_siglip_name_or_path, 'ema_kwargs.json')):
+                    with open(os.path.join(args.model_config.ema_pretrained_lora_siglip_name_or_path, 'ema_kwargs.json'), 'r') as f:
+                        ema_kwargs = json.load(f)
+                    ema_siglip_lora.load_state_dict(ema_kwargs)
+        else:
+            ema_siglip_lora = EMAModel_SigLIP_LoRA.from_pretrained(
+                os.path.join(resume_checkpoint_path, 'siglip_lora_ema'), 
+                PeftModel, args.model_config.pretrained_siglip_name_or_path
+                )
+        ema_siglip_lora.to(accelerator.device)
+        is_ema_siglip_lora = True
+        accelerator.print(f"Load ema siglip_lora finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
+    # =======================================================================================================
 
     # Load optimizer
     use_deepspeed_optimizer = (
@@ -699,6 +762,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 f.write(f"{name}\n")
                 # print(f"{name}.requires_grad: True")
         accelerator.print("Trainable params:", len(trainable_params))
+    
     if use_deepspeed_optimizer:
         from accelerate.utils import DummyOptim
 
@@ -1120,7 +1184,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-            if accelerator.sync_gradients:        
+            if accelerator.sync_gradients:     
+                if is_ema_siglip_lora:
+                    ema_siglip_lora.step(joint_model.module.siglip_model.parameters())
                 if args.training_config.ema_deepspeed_config_file is not None and global_step % args.training_config.ema_update_freq == 0:
                     ema_model.step(joint_model.module.lvlm_model.siglip_projector.parameters())
 
@@ -1185,7 +1251,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     base_eval_image_paths = args.dataset_config.validation_redux_path
                 if accelerator.is_main_process and global_step % args.training_config.validation_steps == 0:
                     if len(base_eval_image_paths) > 0:
-
+                        if args.model_config.lora_r > 0:
+                            if args.training_config.drop_lora_rate > 0.0:
+                                accelerator.unwrap_model(joint_model).revert_lora_scaling()
                         unwrapped_lvlm_model = accelerator.unwrap_model(joint_model).lvlm_model
                         unwrapped_siglip_model = accelerator.unwrap_model(joint_model).siglip_model
                         pipe = FluxPipeline.from_pretrained(

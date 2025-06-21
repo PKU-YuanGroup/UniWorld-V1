@@ -39,5 +39,5 @@ accelerate launch \
   --machine_rank ${RANK} \
   --num_machines ${WORLD_SIZE} \
   --num_processes ${NUM_PROCESSES} \
-  train_redux_ema.py \
+  train_redux.py \
   scripts/redux/flux_redux_1024_zerores_stage2_any15.yaml

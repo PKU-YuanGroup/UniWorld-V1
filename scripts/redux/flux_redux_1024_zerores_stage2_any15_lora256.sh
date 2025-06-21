@@ -13,12 +13,18 @@ export NCCL_IB_TIMEOUT=22
 export NCCL_IB_QPS_PER_CONNECTION=8
 export NCCL_NET_PLUGIN=none
 
+# export ACCL_C4_STATS_MODE=CONN
+# export ACCL_IB_SPLIT_DATA_NUM=4
+# export ACCL_IB_QPS_LOAD_BALANCE=1
+# export ACCL_IB_GID_INDEX_FIX=1
+# export ACCL_LOG_TIME=1
+
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 MASTER_PORT=${MASTER_PORT:-29500}
 RANK=${RANK:-0}
 WORLD_SIZE=${WORLD_SIZE:-1}
 NUM_PROCESSES=$((8 * WORLD_SIZE))
-# NUM_PROCESSES=7
+# NUM_PROCESSES=1
 # export  CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7
 # NEED MODIFY in YAML:
   # data_txt
@@ -34,5 +40,5 @@ accelerate launch \
   --machine_rank ${RANK} \
   --num_machines ${WORLD_SIZE} \
   --num_processes ${NUM_PROCESSES} \
-  train_redux_v1_2.py \
-  scripts/redux/flux_redux_1024_unshuffle_lr3_wu50k.yaml
+  train_redux.py \
+  scripts/redux/flux_redux_1024_zerores_stage2_any15_lora256.yaml

@@ -57,12 +57,14 @@ class TrainingConfig:
 
     ema_deepspeed_config_file: Optional[str] = None
     ema_update_freq: int = 1
-    ema_decay: float = 0.99
+    ema_decay: float = 0.999
 
     drop_lora_rate: float = 0.0
     drop_lora_layer_wise: bool = False
 
     ce_loss_weight: float = 1.0
+
+    ema_siglip_lora: bool = False
 
 @dataclass
 class DatasetConfig:
@@ -128,6 +130,9 @@ class ModelConfig:
     pretrained_denoiser_name_or_path: str
     pretrained_siglip_name_or_path: Optional[str] = None
 
+    pretrained_lora_siglip_name_or_path: Optional[str] = None
+    ema_pretrained_lora_siglip_name_or_path: Optional[str] = None
+
     train_vision_tower_mm_projector: bool = False
 
     guidance_scale: float = 1.0  # Used in Flux
@@ -173,6 +178,13 @@ class ModelConfig:
     with_tune_aspect_ratio_embedder: bool = True
 
     
+    lora_r_for_vlm: int = -1
+    lora_alpha_for_vlm: int = -1
+    lora_dropout_for_vlm: float = 0.0
+    lora_target_modules_for_vlm: Optional[List[str]] = field(
+        default_factory=lambda: ['q_proj', 'k_proj', 'v_proj', 'out_proj', 'fc1', 'fc2']
+    )
+
 @dataclass
 class UnivaTrainingDenoiseConfig:
     training_config: TrainingConfig
