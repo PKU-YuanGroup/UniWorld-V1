@@ -1,10 +1,10 @@
 training_config:
   wandb_project: "redux"
-  wandb_name: "flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256"
+  wandb_name: "flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256_resume"
   seed: 1234
-  output_dir: ./checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256
-  logging_dir: ./logs/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256
-  max_train_steps: 500000
+  output_dir: ./checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256_resume
+  logging_dir: ./logs/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256_resume
+  max_train_steps: 100000
   optimizer: "adamw"
   learning_rate: 1e-4
   adam_beta1: 0.9
@@ -14,8 +14,8 @@ training_config:
   mixed_precision: "bf16"
   report_to: "wandb"
   gradient_checkpointing: false
-  num_train_epochs: 5
-  lr_scheduler: "constant_with_warmup"
+  num_train_epochs: 1
+  lr_scheduler: "cosine"
   lr_warmup_steps: 10000
   lr_num_cycles: 1
   lr_power: 1.0
@@ -33,6 +33,8 @@ model_config:
   pretrained_lvlm_name_or_path: /mnt/data/checkpoints/UniWorld-V1.1-Redux
   pretrained_denoiser_name_or_path: /mnt/data/checkpoints/black-forest-labs/FLUX.1-dev/
   pretrained_siglip_name_or_path: /mnt/data/checkpoints/google/siglip2-so400m-patch16-512
+  pretrained_lora_siglip_name_or_path: /mnt/data/lb/6.5/UniWorld-V1/checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256/checkpoint-135000/siglip_lora
+  ema_pretrained_lora_siglip_name_or_path: /mnt/data/lb/6.5/UniWorld-V1/checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256/checkpoint-135000/siglip_lora_ema
   guidance_scale: 1.0
   only_tune_mlp2: false
   with_tune_mlp2: false
@@ -43,7 +45,7 @@ model_config:
   only_tune_siglip_mlp: false
   with_tune_siglip_mlp: false
   with_tune_pretrained_redux_mlp: false
-  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb/checkpoint-17000/redux_ema_sftr/diffusion_pytorch_model.safetensors
+  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256/checkpoint-135000/redux/diffusion_pytorch_model.safetensors
   only_use_t5: false
   vae_fp32: true
   compile_flux: false

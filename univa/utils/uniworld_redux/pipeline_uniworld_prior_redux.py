@@ -476,10 +476,8 @@ class UniWorldPriorReduxPipeline(DiffusionPipeline):
                 anchor_pixels=self.image_embedder.config.anchor_pixels, 
                 stride=self.image_embedder.config.stride, 
                 )
-            aspect_ratio = torch.tensor([gen_height / gen_width], device=device)
         elif image is not None and isinstance(image, list):
             batch_size = len(image)
-            aspect_ratio = []
             for i in image:
                 if isinstance(i, Image.Image):
                     width, height = i.size
@@ -489,7 +487,6 @@ class UniWorldPriorReduxPipeline(DiffusionPipeline):
                         anchor_pixels=self.image_embedder.config.anchor_pixels, 
                         stride=self.image_embedder.config.stride, 
                         )
-                    aspect_ratio.append(gen_height / gen_width)
                 else:
                     width, height = Image.open(i).size
                     gen_height, gen_width = dynamic_resize(
@@ -498,8 +495,6 @@ class UniWorldPriorReduxPipeline(DiffusionPipeline):
                         anchor_pixels=self.image_embedder.config.anchor_pixels, 
                         stride=self.image_embedder.config.stride, 
                         )
-                    aspect_ratio.append(height / width)
-            aspect_ratio = torch.tensor(aspect_ratio, device=device)
         else:
             batch_size = image.shape[0]
             
@@ -509,7 +504,6 @@ class UniWorldPriorReduxPipeline(DiffusionPipeline):
                 anchor_pixels=self.image_embedder.config.anchor_pixels, 
                 stride=self.image_embedder.config.stride, 
                 )
-            aspect_ratio = torch.tensor([gen_height / gen_width] * batch_size, device=device)
 
         if prompt is not None and isinstance(prompt, str):
             prompt = batch_size * [prompt]
@@ -522,7 +516,7 @@ class UniWorldPriorReduxPipeline(DiffusionPipeline):
         # 3. Prepare image embeddings
         image_latents = self.encode_image(image, device, 1)
 
-        image_embeds = self.image_embedder(image_latents, aspect_ratio).image_embeds
+        image_embeds = self.image_embedder(image_latents).image_embeds
         image_embeds = image_embeds.to(device=device)
 
         # 3. Prepare (dummy) text embeddings

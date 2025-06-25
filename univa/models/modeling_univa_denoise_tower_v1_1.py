@@ -11,9 +11,7 @@ from diffusers import FluxTransformer2DModel, SD3Transformer2DModel
 from diffusers.utils import is_torch_version
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.attention_processor import Attention
-from diffusers.models.embeddings import apply_rotary_emb, Timesteps, TimestepEmbedding
 from torch.nn.utils.rnn import pad_sequence
-from einops.layers.torch import Rearrange
 from einops import rearrange
 from .modeling_univa_denoise_tower import UnivaDenoiseTower
 
@@ -121,35 +119,6 @@ class FluxFlexAttnProcessor2_0:
         else:
             return hidden_states
 
-
-
-class PixArtAlphaAspectEmbeddings(nn.Module):
-    """
-    For PixArt-Alpha.
-
-    Reference:
-    https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L164C9-L168C29
-    """
-
-    def __init__(self, embedding_dim=4096):
-        super().__init__()
-
-        self.aspect_ratio_proj = Timesteps(num_channels=512, flip_sin_to_cos=True, downscale_freq_shift=0)
-        self.aspect_ratio_embedder = TimestepEmbedding(in_channels=512, time_embed_dim=embedding_dim)
-
-        self.silu = nn.SiLU()
-        self.linear = nn.Linear(embedding_dim, embedding_dim, bias=True)
-
-    def forward(
-        self,
-        aspect_ratio: torch.Tensor,
-        hidden_dtype: Optional[torch.dtype] = None,
-    ):
-        aspect_ratio_emb = self.aspect_ratio_proj(aspect_ratio).to(hidden_dtype)
-        aspect_ratio_emb = self.aspect_ratio_embedder(aspect_ratio_emb)
-        return self.linear(self.silu(aspect_ratio_emb)).unsqueeze(1)
-
-
 class ZeroResBlock(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -186,6 +155,14 @@ class ZeroResBlock(nn.Module):
 class ReduxImageEncoderOutput(BaseOutput):
     image_embeds: Optional[torch.Tensor] = None
 
+class Rearrange(nn.Module):
+    def __init__(self, pattern, any_dict):
+        super().__init__()
+        self.pattern = pattern
+        self.any_dict = any_dict
+    def forward(self, x):
+        return rearrange(x, self.pattern, **self.any_dict)
+
 class ReduxImageEncoder(ModelMixin, ConfigMixin):
     @register_to_config
     def __init__(
@@ -208,14 +185,13 @@ class ReduxImageEncoder(ModelMixin, ConfigMixin):
                 txt_in_features * 3, 
                 txt_in_features,
             ),
-            Rearrange('b (h h2) (w w2) c -> b h w (c h2 w2)', h2=2, w2=2), # pixunshuffle
+            Rearrange('b (h h2) (w w2) c -> b h w (c h2 w2)', {'h2': 2, 'w2': 2}), # pixunshuffle
             nn.Linear(
                 txt_in_features * 4, 
                 txt_in_features, 
             ),
             ZeroResBlock(txt_in_features), 
         )
-        self.aspect_ratio_embedder = PixArtAlphaAspectEmbeddings(txt_in_features)
 
         new_linear = self.siglip_projector[4]
         assert isinstance(new_linear, nn.Linear)
@@ -231,17 +207,8 @@ class ReduxImageEncoder(ModelMixin, ConfigMixin):
                     new_linear.weight[j, base + 3] = 0.25
                 new_linear.bias.zero_()
 
-    def forward(self, x: torch.Tensor, aspect_ratio: Optional[torch.Tensor] = None) -> ReduxImageEncoderOutput:
+    def forward(self, x: torch.Tensor) -> ReduxImageEncoderOutput:
         projected_x = self.siglip_projector(x)
-        if aspect_ratio is None:
-            aspect_ratio = torch.full(
-                    (projected_x.shape[0],),  # 直接一次性创建所有
-                    fill_value=1.0,
-                    device=projected_x.device,
-                    dtype=torch.float32, 
-                )
-        aspect_ratio_embed = self.aspect_ratio_embedder(aspect_ratio, projected_x.dtype)
-        projected_x = torch.concat([projected_x, aspect_ratio_embed], dim=1)
         return ReduxImageEncoderOutput(image_embeds=projected_x)
     
 class UnivaDenoiseTower_V1_1(UnivaDenoiseTower):

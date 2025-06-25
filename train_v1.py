@@ -276,17 +276,21 @@ def create_ema_model(
             accelerator.print(f'Successully resume EMAModel_Zero3 from {ema_model_path}')
     else:
         # we load weights from original model instead of deepcopy
-        # model = model_cls.from_config(model_config)
-        # accelerator.print('init model', model)
-        # for k, v in model.state_dict().items():
-        #     accelerator.print(k, v.shape)
-        # model.load_state_dict(ema_model_state_dict, strict=True)
-        model = model_cls.from_pretrained(
-            args.model_config.ema_pretrained_lvlm_name_or_path,
-            # config=lvlm_model.config,
-            # deepspeed=dschf.to_dict(),    # 关键参数
-            torch_dtype=torch.float32,           # fp32
-        )
+        if args.model_config.ema_pretrained_lvlm_name_or_path is not None:
+            model = model_cls.from_pretrained(
+                args.model_config.ema_pretrained_lvlm_name_or_path,
+                # config=lvlm_model.config,
+                # deepspeed=dschf.to_dict(),    # 关键参数
+                torch_dtype=torch.float32,           # fp32
+            )
+        else:
+            model = model_cls.from_pretrained(
+                args.model_config.pretrained_lvlm_name_or_path,
+                # config=lvlm_model.config,
+                # deepspeed=dschf.to_dict(),    # 关键参数
+                torch_dtype=torch.float32,           # fp32
+            )
+            model.load_state_dict(ema_model_state_dict, strict=True)
         accelerator.print(f"model_cls.from_pretrained finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
         model.eval().requires_grad_(False)
         model.to(accelerator.device)
@@ -297,8 +301,6 @@ def create_ema_model(
             )
         accelerator.print(f"EMAModel_Zero3 finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
         accelerator.print(f'Successully deepcopy EMAModel_Zero3 from model')
-    # from deepspeed.runtime.zero import Init as DSZeroInit
-    # with DSZeroInit(config=ds_config):
     ema_model.model, _, _, _ = deepspeed.initialize(model=ema_model.model, config_params=ds_config)
     return ema_model
 
@@ -369,14 +371,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     dataset_type = args.dataset_config.dataset_type
     model_class = MODEL_TYPE[dataset_type]
     dataset_class = DATASET_TYPE[dataset_type]
-    if args.model_config.compile_flux:
-        from univa.utils.compile_utils.compile_flux import CompiledFluxTransformerBlock, CompiledFluxSingleTransformerBlock, CompiledAdaLayerNormContinuous, CompiledCombinedTimestepTextProjEmbeddings, CompiledFluxPosEmbed
-    if args.model_config.compile_qwen2p5vl:
-        from univa.utils.compile_utils.compile_qwen2p5vl import CompiledQwen2_5_VLDecoderLayer, CompiledQwen2_5_VLPatchMerger, CompiledQwen2_5_VLVisionBlock, CompiledQwen2_5_VisionPatchEmbed, CompiledQwen2_5_VisionRotaryEmbedding, CompiledQwen2_5_VLRotaryEmbedding
-    # from univa.utils.compile_utils.compile_siglip import CompiledSiglipVisionModel
-    # from univa.utils.compile_utils.compile_vae import CompiledEncoder, CompiledAutoencoderKL
-    # from univa.utils.compile_utils.compile_t5 import CompiledT5Block
-    # from univa.utils.compile_utils.compile_clip import CompiledCLIPTextModel
 
     # Load models
     lvlm_model = model_class.from_pretrained(
@@ -391,14 +385,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         )
         lvlm_tokenizer = processor.tokenizer
         image_processor = processor.image_processor
-
-    elif dataset_type == 'llava':
-        lvlm_tokenizer = AutoTokenizer.from_pretrained(
-            args.model_config.pretrained_lvlm_name_or_path,
-        )
-        image_processor = AutoImageProcessor.from_pretrained(
-            args.model_config.pretrained_lvlm_name_or_path,
-        )
     else:
          raise NotImplementedError(f"Only support dataset_type in ['qwen2p5vl', 'llava'], but found {dataset_type}")
 
@@ -740,12 +726,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         ]
     )
 
-    # transform = transforms.Compose(
-    #     transforms=[
-    #         transforms.Resize((args.dataset_config.height, args.dataset_config.width)),
-    #         transforms.Normalize([0.5], [0.5]),
-    #     ]
-    # )
     data_collator = DataCollator(tokenizer=lvlm_tokenizer, padding_side=args.dataset_config.padding_side)
     dataset = dataset_class(
         dataset_type=dataset_type, 
@@ -760,7 +740,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         image_token_length=lvlm_model.config.image_token_length,
         only_generated_task=True,
         drop_prompt_rate=args.training_config.drop_condition_rate,
-        joint_ref_feature=args.model_config.joint_ref_feature, 
         anyres=args.dataset_config.anyres, 
         mask_weight_type=args.training_config.mask_weight_type, 
         siglip_processor=siglip_processor, 
@@ -780,8 +759,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         num_workers=args.dataset_config.num_workers,
         collate_fn=data_collator,
         prefetch_factor=None if args.dataset_config.num_workers == 0 else 4, 
-        # prefetch_factor=None, 
-        # persistent_workers=True, 
     )
 
     overrode_max_train_steps = False
@@ -837,7 +814,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     args.training_config.num_train_epochs = math.ceil(
         args.training_config.max_train_steps / num_update_steps_per_epoch
     )
-    print('OmegaConf.to_container(args, resolve=True)', OmegaConf.to_container(args, resolve=True))
     if accelerator.is_main_process:
         accelerator.init_trackers(
             args.training_config.wandb_project,
@@ -878,16 +854,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         disable=not accelerator.is_local_main_process,
     )
 
-    def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
-        sigmas = noise_scheduler_copy.sigmas.to(device=accelerator.device, dtype=dtype)
-        schedule_timesteps = noise_scheduler_copy.timesteps.to(accelerator.device)
-        timesteps = timesteps.to(accelerator.device)
-        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
-
-        sigma = sigmas[step_indices].flatten()
-        while len(sigma.shape) < n_dim:
-            sigma = sigma.unsqueeze(-1)
-        return sigma
 
     tokenizers = [tokenizer_one, tokenizer_two]
     text_encoders = [
@@ -959,13 +925,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 area_mask_weights = batch["weights"]
                 pil_pixel_values = batch["pil_pixel_values"]
                 siglip_pixel_values = batch["siglip_pixel_values"]
-                # print(pil_pixel_values)
-                # print(generated_image.shape)
-                
-                # if input_ids.shape[1] > 512:
-                #     print(f'rank: {accelerator.process_index}, {input_ids.shape}')
-                # if input_ids.shape[1] > 512 and pixel_values is not None and pixel_values.shape[1] > 1024:
-                #     print(f'BOTH rank: {accelerator.process_index}, {input_ids.shape}, {pixel_values.shape}')
 
                 if args.training_config.drop_t5_rate <= random.random():
                     with torch.no_grad():
@@ -991,7 +950,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     with torch.no_grad():
                         siglip_hidden_states = siglip_model(siglip_pixel_values).last_hidden_state
                     # siglip_hidden_states Bb n d
-                # print('generated_image.shape', generated_image.shape)
                 # VAE encode
                 def vae_encode(x):
                     with torch.no_grad():
@@ -1009,13 +967,11 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 unpad_model_input = None
                 if isinstance(generated_image, list):
                     assert args.dataset_config.batch_size != 1
-                    # import ipdb;ipdb.set_trace()
                     unpad_model_input = [vae_encode(x) for x in generated_image]
                     denoiser_attention_mask = [torch.ones_like(x, device=x.device, dtype=x.dtype) for x in unpad_model_input]
                     model_input, denoiser_attention_mask = pad_x_and_mask(unpad_model_input, denoiser_attention_mask)
                     weight_mask = denoiser_attention_mask.detach().clone()
                     denoiser_attention_mask = F.max_pool2d(denoiser_attention_mask, kernel_size=2, stride=2).bool()
-                    # import ipdb;ipdb.set_trace()
                     denoiser_attention_mask = denoiser_attention_mask.flatten(-2)
                 else:
                     model_input = vae_encode(generated_image)
@@ -1039,62 +995,40 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 bsz = model_input.shape[0]
 
 
-                if args.training_config.discrete_timestep:
-                    # Sample a random timestep for each image
-                    # for weighting schemes where we sample timesteps non-uniformly
-                    u = compute_density_for_timestep_sampling(
-                        weighting_scheme=args.training_config.weighting_scheme,
-                        batch_size=bsz,
-                        logit_mean=args.training_config.logit_mean,
-                        logit_std=args.training_config.logit_std,
-                        mode_scale=args.training_config.mode_scale,
-                    )
-                    indices = (u * noise_scheduler_copy.config.num_train_timesteps).long()
-                    timesteps = noise_scheduler_copy.timesteps[indices].to(
-                        device=model_input.device, non_blocking=True
-                    )
+                def calculate_shift(
+                    image_seq_len,
+                    base_seq_len: int = 256,
+                    max_seq_len: int = 4096,
+                    base_shift: float = 0.5,
+                    max_shift: float = 1.16,
+                ):
+                    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+                    b = base_shift - m * base_seq_len
+                    mu = image_seq_len * m + b
+                    return mu
 
-                    # Add noise according to flow matching.
-                    # zt = (1 - texp) * x + texp * z1
-                    sigmas = get_sigmas(
-                        timesteps, n_dim=model_input.ndim, dtype=model_input.dtype
-                    )
-                else:
-                    def calculate_shift(
+                def apply_flux_schedule_shift(sigmas, noise):
+                    # Resolution-dependent shifting of timestep schedules as per section 5.3.2 of SD3 paper
+                    # Resolution-dependent shift value calculation used by official Flux inference implementation
+                    image_seq_len = (noise.shape[-1] * noise.shape[-2]) // 4
+                    mu = calculate_shift(
                         image_seq_len,
-                        base_seq_len: int = 256,
-                        max_seq_len: int = 4096,
-                        base_shift: float = 0.5,
-                        max_shift: float = 1.16,
-                    ):
-                        m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-                        b = base_shift - m * base_seq_len
-                        mu = image_seq_len * m + b
-                        return mu
-
-                    def apply_flux_schedule_shift(sigmas, noise):
-                        # Resolution-dependent shifting of timestep schedules as per section 5.3.2 of SD3 paper
-                        # Resolution-dependent shift value calculation used by official Flux inference implementation
-                        image_seq_len = (noise.shape[-1] * noise.shape[-2]) // 4
-                        mu = calculate_shift(
-                            image_seq_len,
-                            noise_scheduler_copy.config.base_image_seq_len,
-                            noise_scheduler_copy.config.max_image_seq_len,
-                            noise_scheduler_copy.config.base_shift,
-                            noise_scheduler_copy.config.max_shift,
-                        )
-                        shift = math.exp(mu)
-                        sigmas = (sigmas * shift) / (1 + (shift - 1) * sigmas)
-                        return sigmas
-    
-                    sigmas = torch.sigmoid(
-                        1.0 * torch.randn((bsz,), device=model_input.device, dtype=torch.float32)
+                        noise_scheduler_copy.config.base_image_seq_len,
+                        noise_scheduler_copy.config.max_image_seq_len,
+                        noise_scheduler_copy.config.base_shift,
+                        noise_scheduler_copy.config.max_shift,
                     )
-                    sigmas = apply_flux_schedule_shift(sigmas, noise)
-                    timesteps = sigmas * 1000.0  # rescale to [0, 1000.0)
-                    while sigmas.ndim < model_input.ndim:
-                        sigmas = sigmas.unsqueeze(-1)
-                # print(f'STEP[{global_step}]-RANK[{accelerator.process_index}], sigmas={sigmas}, noise: max {noise.max()}, min {noise.min()}, mean {noise.mean()}, std {noise.std()}')
+                    shift = math.exp(mu)
+                    sigmas = (sigmas * shift) / (1 + (shift - 1) * sigmas)
+                    return sigmas
+
+                sigmas = torch.sigmoid(
+                    1.0 * torch.randn((bsz,), device=model_input.device, dtype=torch.float32)
+                )
+                sigmas = apply_flux_schedule_shift(sigmas, noise)
+                timesteps = sigmas * 1000.0  # rescale to [0, 1000.0)
+                while sigmas.ndim < model_input.ndim:
+                    sigmas = sigmas.unsqueeze(-1)
                 noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
                 packed_noisy_model_input = FluxPipeline._pack_latents(
@@ -1104,76 +1038,13 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     height=model_input.shape[2],
                     width=model_input.shape[3],
                 )
-                # print(f'STEP[{global_step}]-RANK[{accelerator.process_index}], noisy_model_input={noisy_model_input.dtype}, packed_noisy_model_input={packed_noisy_model_input.dtype}')
-
-                # guidance = torch.tensor(
-                #     [args.model_config.guidance_scale], device=accelerator.device
-                # )
-                # guidance = guidance.expand(model_input.shape[0])
-
-                # 优化写法，避免 Python list 构造
                 guidance = torch.full(
-                    (model_input.shape[0],),  # 直接一次性创建所有
+                    (model_input.shape[0],), 
                     fill_value=args.model_config.guidance_scale,
                     device=accelerator.device,
                 )
 
-                if (args.model_config.joint_ref_feature_as_condition or args.model_config.joint_ref_feature) \
-                    and len(ref_pixel_values) > 0:
-                    noisy_model_input_len = packed_noisy_model_input.shape[-2]
-                    ref_pixel_values = ref_pixel_values.to(
-                        device=packed_noisy_model_input.device, dtype=packed_noisy_model_input.dtype, non_blocking=True
-                        )
-                    tmp_BS, tmp_mini_bs = ref_pixel_values.shape[:2]
-                    zero_ref_mask = torch.all(ref_pixel_values.reshape(tmp_BS, -1) == 0, dim=-1)
-                    # B is data parallel number, b is image number in a sequence.
-                    ref_pixel_values = rearrange(ref_pixel_values, 'B b c h w -> (B b) c h w')
-                    def encode_vae_and_pack(x_input):
-                        x_input = x_input.to(device=vae.device, dtype=vae.dtype, non_blocking=True)
-                        x = vae.encode(x_input).latent_dist.sample()
-                        x = (x - vae.config.shift_factor) * vae.config.scaling_factor
-                        x = x.to(dtype=weight_dtype)
-                        x_pack = FluxPipeline._pack_latents(
-                            x,
-                            batch_size=x.shape[0],
-                            num_channels_latents=x.shape[1],
-                            height=x.shape[2],
-                            width=x.shape[3],
-                        )
-                        return x, x_pack
-                    ref_features, ref_features_pack = encode_vae_and_pack(ref_pixel_values)
-
-                    if args.model_config.joint_ref_feature:
-                        ref_features_pack = rearrange(
-                            ref_features_pack, '(B b) n d -> B (b n) d', B=tmp_BS, b=tmp_mini_bs
-                            )
-
-                        packed_noisy_model_input = torch.cat(
-                            [packed_noisy_model_input, ref_features_pack], dim=-2
-                            )
-                        
-                        latent_image_ids = FluxPipeline._prepare_latent_image_ids(
-                            model_input.shape[0],
-                            (model_input.shape[2] // 2) * (tmp_mini_bs + 1),
-                            model_input.shape[3] // 2,
-                            accelerator.device,
-                            weight_dtype,
-                        )
-
-                if args.model_config.joint_ref_feature_as_condition and len(ref_pixel_values) > 0:
-                    ref_features_for_vlm = F.avg_pool2d(ref_features, kernel_size=2, stride=2)
-                    ref_features_for_vlm = FluxPipeline._pack_latents(
-                            ref_features_for_vlm,
-                            batch_size=ref_features_for_vlm.shape[0],
-                            num_channels_latents=ref_features_for_vlm.shape[1],
-                            height=ref_features_for_vlm.shape[2],
-                            width=ref_features_for_vlm.shape[3],
-                        )
-                    ref_features_for_vlm = rearrange(
-                        ref_features_for_vlm, '(B b) n d -> B (b n) d', B=tmp_BS, b=tmp_mini_bs
-                        )
-                else:
-                    ref_features_for_vlm = None
+                ref_features_for_vlm = None
 
                 model_pred = lvlm_model(
                     input_ids=input_ids,
@@ -1196,8 +1067,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                         "joint_attention_kwargs": dict(attention_mask=denoiser_attention_mask) if denoiser_attention_mask is not None else {}
                     },
                 )
-                if args.model_config.joint_ref_feature and len(ref_pixel_values) > 0:
-                    model_pred = model_pred[:, :noisy_model_input_len]
                 model_pred = FluxPipeline._unpack_latents(
                     model_pred,
                     height=model_input.shape[2] * vae_scale_factor,
@@ -1211,26 +1080,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     sigmas=sigmas,
                 ) if not args.training_config.sigmas_as_weight else sigmas
 
-                def save_fig(matrix, name):
-                    import numpy as np
-                    import matplotlib.pyplot as plt
-                    plt.figure(figsize=(4, 4), dpi=100)
-                    plt.imshow(matrix, interpolation='nearest', aspect='auto')
-                    plt.colorbar()    
-                    plt.savefig(f'{name}.png',
-                                dpi=300,                   # 输出分辨率
-                                bbox_inches='tight'        # 去掉多余边白
-                            )
-                
-                area_mask_weights_bak = None
                 if args.training_config.mask_weight_type is not None:
                     if isinstance(area_mask_weights, list):
                         assert args.dataset_config.batch_size != 1
-                        # print(area_mask_weights[0].shape, unpad_model_input[0].shape)
-                        # print(area_mask_weights[1].shape, unpad_model_input[1].shape)
-                        # save_fig(area_mask_weights[0][0][0], 'area_mask_weights[0][0]')
-                        # save_fig(area_mask_weights[1][0][0], 'area_mask_weights[1][0]')
-                        area_mask_weights_bak = area_mask_weights
                         # because qwenvl's auto-resize do NOT match the anyres transform
                         # area_mask_weights can be nearest-resized
                         # 1. area_mask_weights are resized to unpad_model_input (output of vae'encoder)
@@ -1246,9 +1098,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                             ]
                         max_h, max_w = model_pred.shape[-2:]
                         area_mask_weights, _ = pad_x_and_mask(area_mask_weights, max_h=max_h, max_w=max_w)
-                        
-                        # save_fig(area_mask_weights[0][0].detach().float().cpu().numpy(), 'pad_x_and_mask_area_mask_weights[0][0]')
-                        # save_fig(area_mask_weights[1][0].detach().float().cpu().numpy(), 'pad_x_and_mask_area_mask_weights[1][0]')
                         assert area_mask_weights.shape[-2:] == model_pred.shape[-2:]
                     else:
                         area_mask_weights = area_mask_weights.to(
@@ -1260,28 +1109,18 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     weighting = weighting.float() * area_mask_weights.float()
 
                 if weight_mask is not None:
-                    # save_fig(weight_mask[0][0].detach().float().cpu().numpy(), 'weight_mask[0][0]')
-                    # save_fig(weight_mask[1][0].detach().float().cpu().numpy(), 'weight_mask[1][0]')
                     weighting = weighting.float() * weight_mask.float()
-                # save_fig(weighting[0][0].detach().float().cpu().numpy(), 'weighting[0][0]')
-                # save_fig(weighting[1][0].detach().float().cpu().numpy(), 'weighting[1][0]')
                 loss = (
                         weighting.float() * (model_pred.float() - target.float()) ** 2
                     ).reshape(target.shape[0], -1)
                 
-                # if area_mask_weights_bak is not None:
-                    # import ipdb;ipdb.set_trace()
                 if weight_mask is not None:
                     assert args.dataset_config.batch_size != 1
                     loss = loss.sum() / weight_mask.sum() / model_pred.shape[1]
                 else:
                     loss = loss.mean()
                 avg_loss_list = accelerator.gather(loss)
-                # if loss > 1.6:
-                #     print(f'HIGH LOSS!!! STEP[{global_step}]-RANK[{accelerator.process_index}] ERROR: loss={loss.detach().item()}, sigmas={sigmas}, prompts={prompts}, model_pred: {model_pred.shape}, max {model_pred.max()} min {model_pred.max()} mean {model_pred.max()} std {model_pred.max()}')
-                #     loss = loss * 0.0
                 accelerator.backward(loss)
-                # import ipdb;ipdb.set_trace()
                 grad_norm = -1.0
                 if accelerator.sync_gradients:
                     if args.training_config.max_grad_norm is not None:
@@ -1364,10 +1203,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                         torch.save(weight_siglip_mlp, os.path.join(save_path, 'siglip_projector.bin'))
                     accelerator.print(f"Saved state to {save_path}")
 
-                # num_machines = accelerator.state.num_processes // 8
-                # node_rank = accelerator.process_index // 8
-                # print(f'node_rank: {node_rank}, num_machines: {num_machines}')
-                # num_run_per_node = 8 // num_run_per_node
                 if global_step % args.training_config.validation_steps == 0:
                     base_eval_prompts, base_eval_image_paths, base_phase_names = build_validation_info(args)
                     # if len(base_eval_prompts) > 0:
@@ -1378,10 +1213,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                         #     ema_state_dict = gather_zero3ema(accelerator, ema_model)
                     
                     
-                # if accelerator.process_index % 8 == 0 and global_step % args.training_config.validation_steps == 0:
-                # if accelerator.is_local_main_process and global_step % args.training_config.validation_steps == 0:
                 if accelerator.is_main_process and global_step % args.training_config.validation_steps == 0:
-                    # print(f'validation rank: {accelerator.process_index}', *[i+'\n------------\n' for i in base_eval_prompts])
                     if len(base_eval_prompts) > 0:
                         # if args.training_config.ema_deepspeed_config_file is not None:
                         #     # ema_state_dict = gather_zero3ema(accelerator, ema_model)
@@ -1409,8 +1241,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                             text_encoders, 
                             phase_name, 
                             only_use_t5, 
-                            joint_ref_feature, 
-                            joint_ref_feature_as_condition, 
                             ):
                         
                         log_validation(
@@ -1439,8 +1269,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                             anyres=args.dataset_config.anyres, 
                             phase_name=phase_name, 
                             only_use_t5=only_use_t5, 
-                            joint_ref_feature=joint_ref_feature, 
-                            joint_ref_feature_as_condition=joint_ref_feature_as_condition, 
                             siglip_processor=siglip_processor, 
                             siglip_model=siglip_model, 
                             pipe=pipe, 
@@ -1456,8 +1284,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                                     text_encoders=[None, text_encoders[1]],  # we do not need clip
                                     phase_name=k.replace('vlm', 't5'), 
                                     only_use_t5=True, 
-                                    joint_ref_feature=False, 
-                                    joint_ref_feature_as_condition=False, 
                                 )
                             else:
                                 warpped_log_validation(
@@ -1466,44 +1292,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                                     text_encoders=[None, text_encoders[1]] if args.training_config.drop_t5_rate < 1.0 else None,  # we do not need clip
                                     phase_name=('t5-'+k) if args.training_config.drop_t5_rate < 1.0 else k, 
                                     only_use_t5=False, 
-                                    joint_ref_feature=False, 
-                                    joint_ref_feature_as_condition=False, 
                                 )
-
-                    if args.model_config.joint_ref_feature or args.model_config.joint_ref_feature_as_condition:
-                        if args.dataset_config.validation_t2i_prompt:
-                            # t2i do have ref feature, t2i is the first sample to log
-                            ref_eval_prompts = base_eval_prompts[1:]
-                            ref_eval_image_paths = base_eval_image_paths[1:]
-                            ref_phase_names = ['vae-' + i for i in base_phase_names[1:]]
-                        else:
-                            ref_eval_prompts = base_eval_prompts
-                            ref_eval_image_paths = base_eval_image_paths
-                            ref_phase_names = ['vae-' + i for i in base_phase_names]
-                            
-
-                        if len(ref_eval_prompts) > 0:
-                            for i, j, k in zip(ref_eval_prompts, ref_eval_image_paths, ref_phase_names):
-                                if args.model_config.only_use_t5:
-                                    warpped_log_validation(
-                                        prompt=i, 
-                                        image_path=j, 
-                                        text_encoders=[None, text_encoder_cls_two],  # we do not need clip
-                                        phase_name=k.replace('vlm', 't5'), 
-                                        only_use_t5=True, 
-                                        joint_ref_feature=args.model_config.joint_ref_feature, 
-                                        joint_ref_feature_as_condition=args.model_config.joint_ref_feature_as_condition, 
-                                    )
-                                else:
-                                    warpped_log_validation(
-                                        prompt=i, 
-                                        image_path=j, 
-                                        text_encoders=[None, text_encoder_cls_two] if args.training_config.drop_t5_rate < 1.0 else None,  # we do not need clip
-                                        phase_name=('t5-'+k) if args.training_config.drop_t5_rate < 1.0 else k, 
-                                        only_use_t5=False, 
-                                        joint_ref_feature=args.model_config.joint_ref_feature, 
-                                        joint_ref_feature_as_condition=args.model_config.joint_ref_feature_as_condition, 
-                                    )
 
                     if len(base_eval_prompts) > 0:
                         
@@ -1567,8 +1356,6 @@ def log_validation(
     pooled_prompt_embeds: Optional[torch.Tensor] = None,
     text_encoders = None,
     tokenizers = None,
-    joint_ref_feature: bool = False, 
-    joint_ref_feature_as_condition: bool = False, 
     vae_image_transform: Optional[Callable] = None,
     ref_cfg: bool = True, 
     anyres: bool = False, 
@@ -1715,93 +1502,7 @@ def log_validation(
     )
     latents, latent_image_ids = None, None
     latents_input_len = 0
-    if joint_ref_feature or joint_ref_feature_as_condition:
-        def prepare_latents(
-            batch_size,
-            num_channels_latents,
-            height,
-            width,
-            dtype,
-            device,
-            generator,
-        ):  
-            from diffusers.utils.torch_utils import randn_tensor
-            # VAE applies 8x compression on images but we must also account for packing which requires
-            # latent height and width to be divisible by 2.
-            height = 2 * (int(height) // (pipe.vae_scale_factor * 2))
-            width = 2 * (int(width) // (pipe.vae_scale_factor * 2))
-
-            shape = (batch_size, num_channels_latents, height, width)
-
-            if isinstance(generator, list) and len(generator) != batch_size:
-                raise ValueError(
-                    f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                    f" size of {batch_size}. Make sure the batch size matches the length of the generators."
-                )
-
-            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-            latents = FluxPipeline._pack_latents(latents, batch_size, num_channels_latents, height, width)
-
-            return latents
-    
-        latents = prepare_latents(
-            1,
-            pipe.transformer.denoise_tower.denoiser.config.in_channels // 4,
-            height or args.dataset_config.height,
-            width or args.dataset_config.width,
-            pipe.vae.dtype,
-            pipe.vae.device,
-            generator,
-        )
-        latents_input_len = latents.shape[-2]
-        tmp_BS, tmp_mini_bs = ref_pixel_values.shape[:2]
-        ref_pixel_values = rearrange(ref_pixel_values, 'B b c h w -> (B b) c h w')
-        assert tmp_BS == 1
-        def encode_vae_and_pack(x_input):
-            x_input = x_input.to(device=pipe.vae.device, dtype=pipe.vae.dtype, non_blocking=True)
-            x = pipe.vae.encode(x_input).latent_dist.sample()
-            x = (x - pipe.vae.config.shift_factor) * pipe.vae.config.scaling_factor
-            x = x.to(dtype=weight_dtype)
-            x_pack = FluxPipeline._pack_latents(
-                x,
-                batch_size=x.shape[0],
-                num_channels_latents=x.shape[1],
-                height=x.shape[2],
-                width=x.shape[3],
-            )
-            return x, x_pack
-        ref_features, ref_features_pack = encode_vae_and_pack(ref_pixel_values)
-        ref_features_pack = rearrange(
-            ref_features_pack, '(B b) n d -> B (b n) d', B=tmp_BS, b=tmp_mini_bs
-            )
-        latents = torch.cat(
-            [latents, ref_features_pack], dim=-2
-            )
-        latent_image_ids = FluxPipeline._prepare_latent_image_ids(
-            tmp_BS, 
-            (height // pipe.vae_scale_factor // 2) * (1 + tmp_mini_bs), 
-            width // pipe.vae_scale_factor // 2, 
-            latents.device, 
-            latents.dtype
-            )
-        
-    if joint_ref_feature_as_condition:
-        # compress 2x
-        ref_features_for_vlm = F.avg_pool2d(ref_features, kernel_size=2, stride=2)
-        ref_features_for_vlm = FluxPipeline._pack_latents(
-                ref_features_for_vlm,
-                batch_size=ref_features_for_vlm.shape[0],
-                num_channels_latents=ref_features_for_vlm.shape[1],
-                height=ref_features_for_vlm.shape[2],
-                width=ref_features_for_vlm.shape[3],
-            )
-        ref_features_for_vlm = rearrange(
-            ref_features_for_vlm, '(B b) n d -> B (b n) d', B=tmp_BS, b=tmp_mini_bs
-            )
-        assert tmp_BS == 1
-        ref_features_for_vlm = ref_features_for_vlm.repeat(2, 1, 1)  # repeat for cfg
-    else:
-        ref_features_for_vlm = None
+    ref_features_for_vlm = None
 
     if not only_use_t5:
         # TODO: use attention_mask

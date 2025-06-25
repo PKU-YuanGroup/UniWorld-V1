@@ -215,16 +215,6 @@ class JointModel(nn.Module):
             with torch.no_grad():
                 siglip_hidden_states = self.siglip_model(siglip_pixel_values).last_hidden_state
         if self.args.dataset_config.height == 1024 and self.args.dataset_config.width == 1024:
-            # siglip_hidden_states = rearrange(
-            #     siglip_hidden_states,
-            #     "(b h2 w2) (h w) c -> b c (h2 h) (w2 w)",
-            #     h2=2,
-            #     w2=2,
-            #     h=(height // self.siglip_model.config.patch_size) // 2,
-            #     w=(width // self.siglip_model.config.patch_size) // 2,
-            # )
-            # siglip_hidden_states = F.avg_pool2d(siglip_hidden_states, kernel_size=2, stride=2)
-            # siglip_hidden_states = rearrange(siglip_hidden_states, 'b c h w -> b h w c')
             siglip_hidden_states = rearrange(
                 siglip_hidden_states,
                 "(b h2 w2) (h w) c -> b (h2 h) (w2 w) c",
@@ -241,8 +231,7 @@ class JointModel(nn.Module):
                 w=width // self.siglip_model.config.patch_size,
             )
 
-        aspect_ratio = kwargs.pop('aspect_ratio')
-        siglip_hidden_states = self.lvlm_model.siglip_projector(siglip_hidden_states, aspect_ratio).image_embeds
+        siglip_hidden_states = self.lvlm_model.siglip_projector(siglip_hidden_states).image_embeds
 
         if random.random() > 0.0:
             encoder_hidden_states = torch.cat([empty_t5_prompt_embeds, siglip_hidden_states], dim=1)
@@ -318,17 +307,19 @@ def create_ema_model(
             accelerator.print(f'Successully resume EMAModel_Zero3 from {ema_model_path}')
     else:
         # we load weights from original model instead of deepcopy
-        # model = model_cls.from_config(model_config)
-        # accelerator.print('init model', model)
-        # for k, v in model.state_dict().items():
-        #     accelerator.print(k, v.shape)
-        # model.load_state_dict(ema_model_state_dict, strict=True)
-        model = model_cls.from_pretrained(
-            args.model_config.ema_pretrained_lvlm_name_or_path,
-            # config=lvlm_model.config,
-            # deepspeed=dschf.to_dict(),    # 关键参数
-            torch_dtype=torch.float32,           # fp32
-        )
+        if args.model_config.ema_pretrained_siglip_mlp_path is not None:
+            model = model_cls.from_pretrained(
+                args.model_config.ema_pretrained_siglip_mlp_path,
+                # config=lvlm_model.config,
+                # deepspeed=dschf.to_dict(),    # 关键参数
+                torch_dtype=torch.float32,           # fp32
+            )
+        else:
+            model = model_cls.from_config(
+                model_config,
+                torch_dtype=torch.float32,           # fp32
+            )
+            # model.load_state_dict(ema_model_state_dict, strict=True)
         accelerator.print(f"model_cls.from_pretrained finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
         model.eval().requires_grad_(False)
         model.to(accelerator.device)
@@ -340,8 +331,6 @@ def create_ema_model(
             )
         accelerator.print(f"EMAModel_Zero3 finish, memory_allocated: {torch.cuda.memory_allocated()/GB:.2f} GB")
         accelerator.print(f'Successully deepcopy EMAModel_Zero3 from model')
-    # from deepspeed.runtime.zero import Init as DSZeroInit
-    # with DSZeroInit(config=ds_config):
     ema_model.model, _, _, _ = deepspeed.initialize(model=ema_model.model, config_params=ds_config)
     return ema_model
 
@@ -427,8 +416,8 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     siglip_processor = SiglipImageProcessor.from_pretrained(
         args.model_config.pretrained_siglip_name_or_path
         )
-    assert args.dataset_config.height in [512, 1024]
-    assert args.dataset_config.width in [512, 1024]
+    assert args.dataset_config.height in [1024]
+    assert args.dataset_config.width in [1024]
     siglip_processor.size = {"height": args.dataset_config.height, "width": args.dataset_config.width}
     siglip_model = SiglipVisionModel.from_pretrained(
         args.model_config.pretrained_siglip_name_or_path, 
@@ -640,7 +629,10 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         if args.model_config.pretrained_siglip_mlp_path.endswith('.safetensors'):
             from safetensors.torch import load_file
             pretrained_siglip_mlp = load_file(args.model_config.pretrained_siglip_mlp_path)
-            joint_model.lvlm_model.siglip_projector.load_state_dict(pretrained_siglip_mlp, strict=True)
+            miss, unexp = joint_model.lvlm_model.siglip_projector.load_state_dict(pretrained_siglip_mlp, strict=False)
+            assert len(miss) == 0, f"miss: {miss}, unexp: {unexp}"
+            for i in unexp:
+                assert 'aspect_ratio_embedder' in i, f"miss: {miss}, unexp: {unexp}"
         else:
             pretrained_siglip_mlp = torch.load(args.model_config.pretrained_siglip_mlp_path)
             pretrained_siglip_mlp = {k.replace('denoise_tower.', ''): v for k, v in pretrained_siglip_mlp.items()}
@@ -680,16 +672,12 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 if i < 3:
                     for param in module.parameters():
                         param.requires_grad = False
-    if args.model_config.with_tune_aspect_ratio_embedder:
-        for name, param in joint_model.lvlm_model.named_parameters():
-            if 'aspect_ratio' in name:
-                param.requires_grad_(True)
 
 
     # =======================================================================================================
     # STEP 6: Create EMAModel_Zero3
     if args.training_config.ema_deepspeed_config_file is not None:
-        ema_model_state_dict = joint_model.lvlm_model.state_dict()
+        ema_model_state_dict = joint_model.lvlm_model.siglip_projector.state_dict()
         with open(args.training_config.ema_deepspeed_config_file, 'r') as f:
             ds_config = json.load(f)
         ema_model = create_ema_model(
@@ -721,7 +709,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 ema_siglip_lora.parameters(), decay=args.training_config.ema_decay, 
                 model_cls=PeftModel, model_config=ema_siglip_lora.config
                 )
-
+            # EMAModel_SigLIP_LoRA is not zero3 mode, so we can load state_dict directly.
             if args.model_config.ema_pretrained_lora_siglip_name_or_path is not None:
                 if os.path.exists(os.path.join(args.model_config.ema_pretrained_lora_siglip_name_or_path, 'ema_kwargs.json')):
                     with open(os.path.join(args.model_config.ema_pretrained_lora_siglip_name_or_path, 'ema_kwargs.json'), 'r') as f:
@@ -837,8 +825,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
         num_workers=args.dataset_config.num_workers,
         collate_fn=data_collator,
         prefetch_factor=None if args.dataset_config.num_workers == 0 else 4, 
-        # prefetch_factor=None, 
-        # persistent_workers=True, 
     )
 
     overrode_max_train_steps = False
@@ -894,7 +880,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     args.training_config.num_train_epochs = math.ceil(
         args.training_config.max_train_steps / num_update_steps_per_epoch
     )
-    print('OmegaConf.to_container(args, resolve=True)', OmegaConf.to_container(args, resolve=True))
     if accelerator.is_main_process:
         accelerator.init_trackers(
             args.training_config.wandb_project,
@@ -987,16 +972,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     generated_image = [gen_img.to(
                             accelerator.device, dtype=vae.dtype, non_blocking=True
                         ) for gen_img in generated_image]
-                    aspect_ratio = [gen_img.shape[-2] / gen_img.shape[-1] for gen_img in generated_image]
-                    aspect_ratio = torch.tensor(aspect_ratio).to(device=accelerator.device, non_blocking=True)
                 else:
                     generated_image = generated_image.to(
                         accelerator.device, dtype=vae.dtype, non_blocking=True
-                    )
-                    aspect_ratio = torch.full(
-                        (generated_image.shape[0],),  # 直接一次性创建所有
-                        fill_value=generated_image.shape[-2] / generated_image.shape[-1],
-                        device=accelerator.device,
                     )
 
                 siglip_pixel_values = batch["siglip_pixel_values"].to(
@@ -1025,8 +1003,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     denoiser_attention_mask = [torch.ones_like(x, device=x.device, dtype=x.dtype) for x in unpad_model_input]
                     model_input, denoiser_attention_mask = pad_x_and_mask(unpad_model_input, denoiser_attention_mask)
                     weight_mask = denoiser_attention_mask.detach().clone()
-                    # denoiser_attention_mask = F.max_pool2d(denoiser_attention_mask, kernel_size=2, stride=2).bool()
-                    # denoiser_attention_mask = denoiser_attention_mask.flatten(-2)
                 else:
                     model_input = vae_encode(generated_image)
                     image_seq_len = (model_input.shape[-1] * model_input.shape[-2]) // 4
@@ -1083,7 +1059,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                 timesteps = sigmas * 1000.0  # rescale to [0, 1000.0)
                 while sigmas.ndim < model_input.ndim:
                     sigmas = sigmas.unsqueeze(-1)
-                # print(f'STEP[{global_step}]-RANK[{accelerator.process_index}], sigmas={sigmas}, noise: max {noise.max()}, min {noise.min()}, mean {noise.mean()}, std {noise.std()}')
                 noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
 
                 packed_noisy_model_input = FluxPipeline._pack_latents(
@@ -1108,7 +1083,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     "guidance": guidance,
                     "pooled_projections": empty_pooled_prompt_embeds if random.random() > 0.0 else zero_pooled_prompt_embeds,
                     "img_ids": latent_image_ids,
-                    "aspect_ratio": aspect_ratio, 
                     "joint_attention_kwargs": {}
                     }
                 with torch.amp.autocast("cuda", dtype=weight_dtype):
@@ -1127,21 +1101,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     sigmas=sigmas,
                 )
 
-                def save_fig(matrix, name):
-                    import numpy as np
-                    import matplotlib.pyplot as plt
-                    plt.figure(figsize=(4, 4), dpi=100)
-                    plt.imshow(matrix, interpolation='nearest', aspect='auto')
-                    plt.colorbar()    
-                    plt.savefig(f'{name}.png',
-                                dpi=300,                   # 输出分辨率
-                                bbox_inches='tight'        # 去掉多余边白
-                            )
-                
-
                 if weight_mask is not None:
-                    # save_fig(weight_mask[0][0].detach().float().cpu().numpy(), 'weight_mask[0][0]')
-                    # save_fig(weight_mask[1][0].detach().float().cpu().numpy(), 'weight_mask[1][0]')
                     weighting = weighting.float() * weight_mask.float()
 
                 loss = (
@@ -1170,15 +1130,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                                 param_norm = p.grad.data.norm(2)
                                 total_norm_sq += param_norm.item() ** 2
                         grad_norm = math.sqrt(total_norm_sq)
-
-                # if accelerator.is_main_process:
-                #     for name, param in joint_model.named_parameters():
-                #         if param.grad is None:
-                #             accelerator.print(f"{name:<70} | grad: None")
-                #         else:
-                #             grad_norm = param.grad.detach().norm().item()
-                #             accelerator.print(f"{name:<70} | grad norm: {grad_norm:.6e}")
-                # import ipdb;ipdb.set_trace()
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -1232,10 +1183,7 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                     save_path = os.path.join(
                         args.training_config.output_dir, f"checkpoint-{global_step}"
                     )
-                    # try:
                     accelerator.save_state(save_path)
-                    # except Exception as e:
-                    #     print(f'RANK: {accelerator.process_index}, error in save_state with {e}')
                     if args.model_config.only_tune_siglip_mlp or args.model_config.with_tune_siglip_mlp:
                         keys_to_match = ['siglip_projector']
                         weight_siglip_mlp = get_mm_adapter_state_maybe_zero_3(joint_model.module.lvlm_model.named_parameters(), keys_to_match)
@@ -1243,10 +1191,6 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                         torch.save(weight_siglip_mlp, os.path.join(save_path, 'siglip_projector.bin'))
                     accelerator.print(f"Saved state to {save_path}")
 
-                # num_machines = accelerator.state.num_processes // 8
-                # node_rank = accelerator.process_index // 8
-                # print(f'node_rank: {node_rank}, num_machines: {num_machines}')
-                # num_run_per_node = 8 // num_run_per_node
                 if global_step % args.training_config.validation_steps == 0:
                     base_eval_image_paths = args.dataset_config.validation_redux_path
                 if accelerator.is_main_process and global_step % args.training_config.validation_steps == 0:
@@ -1340,7 +1284,6 @@ def log_validation(
     width, height = image.size
     anchor_pixels = args.dataset_config.width * args.dataset_config.height
     gen_height, gen_width = dynamic_resize(height, width, args.dataset_config.anyres, anchor_pixels)
-    aspect_ratio = torch.tensor([gen_height/gen_width]).to(device=accelerator.device)
     siglip_pixel_values = siglip_processor(images=image, return_tensors='pt', do_resize=True, do_center_crop=True).pixel_values
     siglip_pixel_values = siglip_pixel_values.to(
         accelerator.device, 
@@ -1373,7 +1316,7 @@ def log_validation(
             w=width // siglip_model.config.patch_size,
         )
 
-    encoder_hidden_states = unwrapped_lvlm_model.siglip_projector(siglip_features, aspect_ratio).image_embeds
+    encoder_hidden_states = unwrapped_lvlm_model.siglip_projector(siglip_features).image_embeds
     
     if empty_t5_prompt_embeds is None or empty_pooled_prompt_embeds is None:
         empty_t5_prompt_embeds = torch.zeros(1, 512, 4096, device=accelerator.device)

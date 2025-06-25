@@ -18,6 +18,14 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
 from univa.models.qwen2p5vl.configuration_univa_qwen2p5vl import UnivaQwen2p5VLConfig
 from univa.models.modeling_univa_denoise_tower_v1_1 import UnivaDenoiseTower_V1_1
 from torch.utils.checkpoint import checkpoint
+import torch.distributed as dist
+_orig_all_reduce = dist.all_reduce
+dist._ar_count = 0
+def debug_all_reduce(tensor, *args, **kwargs):
+    dist._ar_count += 1
+    print(f"[Rank {dist.get_rank()}] all_reduce #{dist._ar_count}, size={tensor.numel()}")
+    return _orig_all_reduce(tensor, *args, **kwargs)
+dist.all_reduce = debug_all_reduce
 
 
 class UnivaQwen2p5VLModel(Qwen2_5_VLModel):
@@ -347,7 +355,6 @@ class UnivaQwen2p5VLForConditionalGeneration_V1_1(Qwen2_5_VLPreTrainedModel, Gen
         vlm_residual_image_factor: float = 0.0, 
         **kwargs,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
-        
         if not only_use_t5:
             if (
                 self.forward_denoiser
@@ -527,14 +534,51 @@ class UnivaQwen2p5VLForConditionalGeneration_V1_1(Qwen2_5_VLPreTrainedModel, Gen
                     # outputs_ref_features = self.denoise_tower.vae_projector(ref_features_for_vlm)
                     outputs_ref_features = self.denoise_tower.vae_projector(ref_features_for_vlm)
                     outputs = torch.cat([outputs, outputs_ref_features], dim=1)
-                if siglip_hidden_states is not None:
-                    # siglip_hidden_states = self.denoise_tower.siglip_projector(siglip_hidden_states)
-                    siglip_hidden_states = self.denoise_tower.siglip_projector(siglip_hidden_states)
-                    indices_list = self.find_all_token_positions(input_ids, self.config.image_end_token_id)
-                    # import ipdb;ipdb.set_trace()
-                    outputs, attention_mask = self._insert_img_to_vlm(outputs, attention_mask, siglip_hidden_states, indices_list)
-                    # print(outputs.shape)
+                print(f"rank: {dist.get_rank()}, siglip_hidden_states: {siglip_hidden_states.shape if siglip_hidden_states is not None else 'None'}, self.config.image_end_token_id: {self.config.image_end_token_id}")
+
+                # if siglip_hidden_states is not None:
+                #     print(f"rank: {dist.get_rank()}, enter siglip_hidden_states is not None")
+                #     siglip_hidden_states = self.denoise_tower.siglip_projector(siglip_hidden_states).image_embeds
+                #     indices_list = self.find_all_token_positions(input_ids, self.config.image_end_token_id)
+                #     # import ipdb;ipdb.set_trace()
+                #     outputs, attention_mask = self._insert_img_to_vlm(outputs, attention_mask, siglip_hidden_states, indices_list)
+                #     # print(outputs.shape)
+                # else:
+                #     print(f"rank: {dist.get_rank()}, enter siglip_hidden_states is None")
+                # print(f"rank: {dist.get_rank()}, after if judge")
+
                 
+                # 1. 统一准备 siglip_hidden_states
+                dummy = False
+                if siglip_hidden_states is None:
+                    # dummy 特征：shape 跟真实的保持一致，但我们设置 indices_list 为空，
+                    # 这样下游插入函数就不会在任何位置插入 img_feature
+                    siglip_hidden_states = torch.zeros(
+                        input_ids.shape[0], 64, 64, 1152,
+                        dtype=outputs.dtype, device=outputs.device
+                    )
+                    indices_list = [[] for _ in range(input_ids.shape[0])]
+                    dummy = True
+                else:
+                    # 正常图片编辑任务：找到所有 image_end_token_id 的位置
+                    indices_list = self.find_all_token_positions(
+                        input_ids, self.config.image_end_token_id
+                    )
+
+                # 2. 不分支，所有样本都走同一条通路
+                siglip_hidden_states = (
+                    self.denoise_tower.siglip_projector(siglip_hidden_states)
+                    .image_embeds
+                )
+                outputs_bak = outputs.detach().clone()
+                attention_mask_bak = attention_mask.detach().clone()
+                outputs, attention_mask = self._insert_img_to_vlm(
+                    outputs, attention_mask, siglip_hidden_states, indices_list, dummy
+                )
+                if dummy:
+                    assert torch.allclose(outputs, outputs_bak)
+                    assert torch.allclose(attention_mask, attention_mask_bak)
+                print(f"rank: {dist.get_rank()}, after unified siglip branch")
 
             if output_type == "denoise_embeds":
                 # LVLM outputs -> MLP2 -> prompt_embeds
@@ -676,7 +720,7 @@ class UnivaQwen2p5VLForConditionalGeneration_V1_1(Qwen2_5_VLPreTrainedModel, Gen
         return model_inputs
 
     @staticmethod
-    def _insert_img_to_vlm(vlm_feature, attention_mask, img_feature, indices_list):
+    def _insert_img_to_vlm(vlm_feature, attention_mask, img_feature, indices_list, dummy=False):
         B, L, D = vlm_feature.shape
         assert img_feature.ndim == 3
         img_L = img_feature.shape[1]
@@ -708,11 +752,11 @@ class UnivaQwen2p5VLForConditionalGeneration_V1_1(Qwen2_5_VLPreTrainedModel, Gen
                 )
 
         img_mask = img_mask.repeat(1, 1, D)
-        assert torch.sum(img_mask) == img_feature.numel()
+        assert dummy or torch.sum(img_mask) == img_feature.numel()
         new_vlm_feature.masked_scatter_(img_mask, img_feature)
 
         vlm_mask = vlm_mask.repeat(1, 1, D)
-        assert torch.sum(vlm_mask) == vlm_feature.numel()
+        assert dummy or torch.sum(vlm_mask) == vlm_feature.numel()
         new_vlm_feature.masked_scatter_(vlm_mask, vlm_feature.view(-1, D))
         return new_vlm_feature, attention_mask
     

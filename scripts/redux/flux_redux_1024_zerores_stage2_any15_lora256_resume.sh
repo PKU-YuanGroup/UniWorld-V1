@@ -41,4 +41,4 @@ accelerate launch \
   --num_machines ${WORLD_SIZE} \
   --num_processes ${NUM_PROCESSES} \
   train_redux.py \
-  scripts/redux/flux_redux_1024_zerores_stage2_any15_lora.yaml
+  scripts/redux/flux_redux_1024_zerores_stage2_any15_lora256_resume.yaml

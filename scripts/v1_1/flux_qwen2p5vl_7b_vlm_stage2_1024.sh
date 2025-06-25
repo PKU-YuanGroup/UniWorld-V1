@@ -12,25 +12,32 @@ export NCCL_IB_HCA=mlx5
 export NCCL_IB_TIMEOUT=22
 export NCCL_IB_QPS_PER_CONNECTION=8
 export NCCL_NET_PLUGIN=none
+export NCCL_DEBUG=INFO
+export TORCH_DISTRIBUTED_DEBUG=INFO
+export TORCH_NCCL_TRACE_BUFFER_SIZE=1MB
+
 
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 MASTER_PORT=${MASTER_PORT:-29500}
 RANK=${RANK:-0}
 WORLD_SIZE=${WORLD_SIZE:-1}
-# NUM_PROCESSES=$((8 * WORLD_SIZE))
-NUM_PROCESSES=1
+NUM_PROCESSES=$((8 * WORLD_SIZE))
+# NUM_PROCESSES=1
 
 # NEED MODIFY in YAML:
   # data_txt
-  # pretrained_lvlm_name_or_path
-  # ema_pretrained_lvlm_name_or_path: same with pretrained_lvlm_name_or_path when the first training
+  # pretrained_lvlm_name_or_path: recommend use ema weight in stage1
+  # ema_pretrained_lvlm_name_or_path: recommend use ema weight in stage1
   # pretrained_denoiser_name_or_path
+  # pretrained_mlp2_path: recomment use ema weight in stage1
+  # pretrained_siglip_mlp_path
+
 accelerate launch \
-  --config_file scripts/accelerate_configs/ddp_config.yaml \
+  --config_file scripts/accelerate_configs/multi_node_example_zero2.yaml \
   --main_process_ip ${MASTER_ADDR} \
   --main_process_port ${MASTER_PORT} \
   --machine_rank ${RANK} \
   --num_machines ${WORLD_SIZE} \
   --num_processes ${NUM_PROCESSES} \
   train_v1_1.py \
-  scripts/v1_1/flux_qwen2p5vl_7b_vlm_stage1_512.yaml
+  scripts/v1_1/flux_qwen2p5vl_7b_vlm_stage2_1024.yaml

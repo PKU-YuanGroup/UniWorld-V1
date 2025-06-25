@@ -43,7 +43,6 @@ model_config:
   only_tune_siglip_mlp: false
   with_tune_siglip_mlp: false
   pretrained_siglip_mlp_path: null
-  joint_ref_feature: false
   only_use_t5: false
   only_tune_image_branch: false
 

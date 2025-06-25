@@ -130,6 +130,8 @@ class ModelConfig:
     pretrained_denoiser_name_or_path: str
     pretrained_siglip_name_or_path: Optional[str] = None
 
+    ema_pretrained_siglip_mlp_path: Optional[str] = None
+    
     pretrained_lora_siglip_name_or_path: Optional[str] = None
     ema_pretrained_lora_siglip_name_or_path: Optional[str] = None
 
@@ -155,8 +157,6 @@ class ModelConfig:
     only_tune_siglip_mlp: bool = False
     pretrained_siglip_mlp_path: Optional[str] = None
 
-    joint_ref_feature: bool = False
-    joint_ref_feature_as_condition: bool = False
     only_use_t5: bool = False
 
     vlm_residual_image_factor: float = 0.0
@@ -175,15 +175,15 @@ class ModelConfig:
     )
 
     with_tune_pretrained_redux_mlp: bool = False
-    with_tune_aspect_ratio_embedder: bool = True
 
     
-    lora_r_for_vlm: int = -1
-    lora_alpha_for_vlm: int = -1
-    lora_dropout_for_vlm: float = 0.0
-    lora_target_modules_for_vlm: Optional[List[str]] = field(
-        default_factory=lambda: ['q_proj', 'k_proj', 'v_proj', 'out_proj', 'fc1', 'fc2']
-    )
+    lora_r_for_lvlm: int = -1
+    lora_alpha_for_lvlm: int = -1
+    lora_dropout_for_lvlm: float = 0.0
+    lora_spacial_embed_tokens: bool = False
+    
+    lora_for_flux: bool = True
+    lora_all_linear_for_vlm: bool = True
 
 @dataclass
 class UnivaTrainingDenoiseConfig:

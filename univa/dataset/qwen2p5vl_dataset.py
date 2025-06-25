@@ -63,7 +63,6 @@ class Qwen2p5VLDataset(Dataset):
         image_token_length: int = 729,
         only_generated_task: bool = False,
         drop_prompt_rate: float = 0.0,
-        joint_ref_feature: bool = False,
         anyres: bool = False, 
         mask_weight_type: str = 'log', 
         siglip_processor: Callable = None,
@@ -90,7 +89,6 @@ class Qwen2p5VLDataset(Dataset):
         self.image_end_token = SPACIAL_TOKEN[dataset_type]['image_end_token']
         self.generated_image_token = GENERATE_TOKEN
         self.image_processor = processor.image_processor
-        # self.factor = 4 if joint_ref_feature else 1
         self.factor = 2
 
         self.only_generated_task = only_generated_task  # For denoiser training

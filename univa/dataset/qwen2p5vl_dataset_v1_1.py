@@ -13,7 +13,7 @@ from einops import rearrange
 import random
 # from qwen_vl_utils.vision_process import fetch_image, fetch_video
 from qwen_vl_utils.vision_process import to_rgb, smart_resize, fetch_video
-from univa.utils.constant import SPACIAL_TOKEN, GENERATE_TOKEN
+from univa.utils.constant import SPACIAL_TOKEN, GENERATE_TOKEN, SYSTEM_PROMPT
 from univa.utils.get_mask import get_weight_mask
 from univa.utils.get_ocr import get_ocr_result
 from fractions import Fraction
@@ -66,7 +66,6 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         image_token_length: int = 729,
         only_generated_task: bool = False,
         drop_prompt_rate: float = 0.0,
-        joint_ref_feature: bool = False,
         anyres: bool = False, 
         mask_weight_type: str = 'log', 
         siglip_processor: Callable = None,
@@ -92,7 +91,6 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         self.prompter = prompter
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
-        # self.factor = 4 if joint_ref_feature else 1
         self.factor = 2
 
         self.only_generated_task = only_generated_task  # For denoiser training
@@ -139,7 +137,7 @@ class Qwen2p5VLDataset_V1_1(Dataset):
                 if len(line['image']) == 0:
                     assert data_type == 'und'
                     line['image'] = [dummy_img_path]
-                    line['conversations'][-1]['value'] = line['conversations'][-1]['value'] + self.generated_image_token
+                    line['conversations'][-1]['value'] = f"{line['conversations'][-1]['value']} {self.generated_image_token}"
                 ################################################################################
                 # Convert image path to absolute path
                 line["need_weight"] = need_weight
@@ -228,8 +226,6 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         ################################################################################
         is_und_data = False
         if data['image'][0] == dummy_img_path and len(data['image']) == 1:
-            last_conv = data['conversations'][-1]['value'] + '<gen_image>'
-            data['conversations'][-1]['value'] = last_conv
             is_und_data = True
         ################################################################################
         for item in data["conversations"]:
@@ -265,11 +261,16 @@ class Qwen2p5VLDataset_V1_1(Dataset):
             conversations_with_think.append({"from": self.prompter.user_role, "value": user_value})
             conversations_with_think.append({"from": self.prompter.assistant_role, "value": assistant_value})
         conversations = conversations_with_think
-        print('\n'.join([str(i) for i in conversations]))
+        # print('\n'.join([str(i) for i in conversations]))
         assert prompt != "", "prompt != ''"
         # The last turn instruction will be used for t5_embed
         prompt = prompt.replace('<image>', '').replace('\n', '')
 
+        conversations = [{
+                        "from": self.prompter.system_role,
+                        # "value": "You are a helpful assistant.",
+                        "value": SYSTEM_PROMPT,
+                    }] + conversations
         # Make prompt
         drop_prompt = False
         if self.only_generated_task:
@@ -282,7 +283,8 @@ class Qwen2p5VLDataset_V1_1(Dataset):
                 prompt_list = [
                     {
                         "from": self.prompter.system_role,
-                        "value": "You are a helpful assistant.",
+                        # "value": "You are a helpful assistant.",
+                        "value": "You are UniWorld, a friendly multimodal assistant from Peking University. You accept multimodal inputs—text, images, and video—and generate outputs across modalities, including text-to-image synthesis, image editing, and reference-based image generation. You genuinely understand user directives and contemplate their deeper intent.",
                     },
                     {
                         "from": self.prompter.user_role,
@@ -315,10 +317,12 @@ class Qwen2p5VLDataset_V1_1(Dataset):
                 ), "Generated image token must in end of prompt"
 
                 # Replace the generated image token with image begin token and without eos token
+                # print(item["prompt"])
                 item["prompt"] = item["prompt"].replace(
                     f"{self.generated_image_token}{self.prompter.eos_token}",
                     self.image_begin_token,
                 )
+                # print('replace to', item["prompt"])
                 has_generated_image = True
 
             if self.ocr_enhancer and (self.image_token in item["prompt"]) and not is_und_data:
@@ -394,7 +398,7 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         weights = image_dict['weights']
         if is_und_data:
             _, weights = get_weight_mask(pil_pixel_values, prompt, self.mask_weight_type, 'false')
-            print('is_und_data')
+            # print('is_und_data')
             weights = torch.zeros_like(weights)
             assert torch.all(weights == 0.0)
 
@@ -544,13 +548,13 @@ class Qwen2p5VLDataset_V1_1(Dataset):
         pil_pixel_values = pil_pixel_values + pil_pixel_values_last
         
         if mask_weight_type is not None:
-            print('load_image mask_weight_type is not None')
+            # print('load_image mask_weight_type is not None')
             _, weights = get_weight_mask(pil_pixel_values, prompt, mask_weight_type, need_weight)
             if need_weight.lower() == 'false':
-                assert torch.all(weights == 1)
+                assert torch.all(weights == 1.0)
         else:
-            print('load_image mask_weight_type is None')
-            _, weights = get_weight_mask(pil_pixel_values, prompt, mask_weight_type, 'false')
+            # print('load_image mask_weight_type is None')
+            _, weights = get_weight_mask(pil_pixel_values, prompt, 'log', 'false')
             assert torch.all(weights == 1.0)
         return {
             'pixel_values': pixel_values, 

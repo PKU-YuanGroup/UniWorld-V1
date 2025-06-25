@@ -41,9 +41,7 @@ model_config:
   only_tune_siglip_mlp: false
   with_tune_siglip_mlp: true
   with_tune_pretrained_redux_mlp: true
-  with_tune_aspect_ratio_embedder: true
   pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/checkpoints/flux_redux_1024_zerores_stage2_any11res_wu10k_ratioemb/checkpoint-10000/siglip_projector.bin
-  joint_ref_feature: false
   only_use_t5: false
   vae_fp32: true
   compile_flux: false

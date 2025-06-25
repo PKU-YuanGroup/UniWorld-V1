@@ -29,6 +29,14 @@ class UnivaQwen2p5VLConfig(Qwen2_5_VLConfig):
         if not shortcut_image_embeds:
             shortcut_projector_type = None
         self.shortcut_projector_type = shortcut_projector_type
+
+        self.image_begin_token_id = None
+        self.image_end_token_id = None
+        self.think_begin_token = None
+        self.think_end_token = None
+        self.think_token = None
+        self.no_think_token = None
+        
         # if isinstance(vision_tower, dict):
         #     vision_tower["shortcut_projector_type"] = shortcut_projector_type
         #     self.vision_tower = UnivaQwen2p5VLVisionTowerConfig(**vision_tower)

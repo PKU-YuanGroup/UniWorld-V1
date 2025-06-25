@@ -9,7 +9,6 @@ from diffusers import FluxTransformer2DModel, SD3Transformer2DModel
 from diffusers.utils import is_torch_version
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from torch.nn.utils.rnn import pad_sequence
-from einops.layers.torch import Rearrange
 
 
 class UnivaDenoiseTower(PreTrainedModel):

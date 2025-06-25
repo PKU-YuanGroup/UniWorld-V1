@@ -1,10 +1,10 @@
 training_config:
   wandb_project: "uniworld-v1_1"
-  wandb_name: "uniworld_v1_1_3bvlm_stage1_512_adamw"
+  wandb_name: "uniworld_v1_1_3bvlm_stage2_1024_adamw_alllinear_spatok_bagel_demo"
   seed: 203
-  output_dir: ./checkpoints/uniworld_v1_1_3bvlm_stage1_512_adamw
-  logging_dir: ./logs/uniworld_v1_1_3bvlm_stage1_512_adamw
-  max_train_steps: 500000
+  output_dir: ./checkpoints/uniworld_v1_1_3bvlm_stage2_1024_adamw_alllinear_spatok_bagel_demo
+  logging_dir: ./logs/uniworld_v1_1_3bvlm_stage2_1024_adamw_alllinear_spatok_bagel_demo
+  max_train_steps: 400
   optimizer: "adamw"
   learning_rate: 1e-5
   adam_beta1: 0.9
@@ -13,23 +13,26 @@ training_config:
   adam_weight_decay: 0.0
   mixed_precision: "bf16"
   report_to: "wandb"
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   num_train_epochs: 1
   lr_scheduler: "constant_with_warmup"
   lr_warmup_steps: 100
   lr_num_cycles: 1
   lr_power: 1.0
   resume_from_checkpoint: null
-  validation_steps: 5000000
+  validation_steps: 1000
   checkpointing_steps: 200
   drop_t5_rate: 1.0
   discrete_timestep: false
   mask_weight_type: 'log'
   gradient_accumulation_steps: 1
+  ema_deepspeed_config_file: scripts/accelerate_configs/zero3.json
+  ema_decay: 0.999
 
 model_config:
   pretrained_lvlm_name_or_path: /mnt/data/checkpoints/UniWorld_V1_1_Qwen2.5-VL-3B-Instruct_FLUX.1-dev
   pretrained_denoiser_name_or_path: /mnt/data/checkpoints/black-forest-labs/FLUX.1-dev/
+  pretrained_siglip_name_or_path: /mnt/data/checkpoints/google/siglip2-so400m-patch16-512
   guidance_scale: 1.0
   only_tune_mlp2: false
   with_tune_mlp2: true
@@ -38,12 +41,15 @@ model_config:
   with_tune_mlp3: false
   pretrained_mlp3_path: null  
   only_tune_siglip_mlp: false
-  with_tune_siglip_mlp: false
-  pretrained_siglip_mlp_path: null
-  joint_ref_feature: false
+  with_tune_siglip_mlp: true
+  pretrained_siglip_mlp_path: /mnt/data/lb/6.5/UniWorld-V1/checkpoints/flux_redux_1024_zerores_stage2_any15res_resume_ratioemb_lora256/checkpoint-74000/redux/diffusion_pytorch_model.safetensors
   only_use_t5: false
-  only_tune_image_branch: false
-  lora_r_for_vlm: 256
+  flux_train_layer_idx: [0]
+  vae_fp32: true
+  only_tune_image_branch: true
+  lora_r_for_lvlm: 256
+  lora_all_linear_for_vlm: true
+  lora_spacial_embed_tokens: true
 
 dataset_config:
   padding_side: "left"
@@ -51,11 +57,11 @@ dataset_config:
   dataset_type: qwen2p5vl_v1_1
   min_pixels: 200704
   max_pixels: 200704
-  data_txt: /mnt/data/lb/6.5/UniWorld-V1/bagel_demo/nlp_demo.txt
+  data_txt: /mnt/data/lb/6.5/UniWorld-V1/bagel_demo/bagel_demo.txt
   batch_size: 1
   num_workers: 16
-  height: 512
-  width: 512
+  height: 1024
+  width: 1024
   pin_memory: true
   validation_t2i_prompt: "Generate an adorable golden retriever puppy playing in a sunny park, with fluffy fur, big round eyes, and a happy expression. The background should have green grass, some flowers, and a blue sky with white clouds."
   
