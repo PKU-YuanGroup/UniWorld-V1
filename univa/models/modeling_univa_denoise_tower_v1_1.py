@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint_sequential
 from torch.nn.attention.flex_attention import flex_attention
 import numpy as np
 from diffusers import FluxTransformer2DModel, SD3Transformer2DModel
@@ -13,6 +14,7 @@ from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.attention_processor import Attention
 from torch.nn.utils.rnn import pad_sequence
 from einops import rearrange
+from einops.layers.torch import Rearrange
 from .modeling_univa_denoise_tower import UnivaDenoiseTower
 
 from dataclasses import dataclass
@@ -22,102 +24,6 @@ from diffusers.utils import BaseOutput
 
 def noop(score, b, h, q_idx, kv_idx):
     return score
-
-class FluxFlexAttnProcessor2_0:
-    """Attention processor used typically in processing the SD3-like self-attention projections."""
-
-    def __init__(self):
-        if not hasattr(F, "scaled_dot_product_attention"):
-            raise ImportError("FluxAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
-
-    def __call__(
-        self,
-        attn: Attention,
-        hidden_states: torch.FloatTensor,
-        encoder_hidden_states: torch.FloatTensor = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        image_rotary_emb: Optional[torch.Tensor] = None,
-    ) -> torch.FloatTensor:
-        batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
-
-        # `sample` projections.
-        query = attn.to_q(hidden_states)
-        key = attn.to_k(hidden_states)
-        value = attn.to_v(hidden_states)
-
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // attn.heads
-
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        if attn.norm_q is not None:
-            query = attn.norm_q(query)
-        if attn.norm_k is not None:
-            key = attn.norm_k(key)
-
-        # the attention in FluxSingleTransformerBlock does not use `encoder_hidden_states`
-        if encoder_hidden_states is not None:
-            # `context` projections.
-            encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
-            encoder_hidden_states_key_proj = attn.add_k_proj(encoder_hidden_states)
-            encoder_hidden_states_value_proj = attn.add_v_proj(encoder_hidden_states)
-
-            encoder_hidden_states_query_proj = encoder_hidden_states_query_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_key_proj = encoder_hidden_states_key_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            ).transpose(1, 2)
-            encoder_hidden_states_value_proj = encoder_hidden_states_value_proj.view(
-                batch_size, -1, attn.heads, head_dim
-            ).transpose(1, 2)
-
-            if attn.norm_added_q is not None:
-                encoder_hidden_states_query_proj = attn.norm_added_q(encoder_hidden_states_query_proj)
-            if attn.norm_added_k is not None:
-                encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
-
-            # attention
-            query = torch.cat([encoder_hidden_states_query_proj, query], dim=2)
-            key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
-            value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
-
-        if image_rotary_emb is not None:
-
-            query = apply_rotary_emb(query, image_rotary_emb)
-            key = apply_rotary_emb(key, image_rotary_emb)
-
-        # hidden_states = F.scaled_dot_product_attention(
-        #     query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-        # )
-
-        hidden_states = flex_attention(
-            query, 
-            key, 
-            value,
-            score_mod=noop, 
-        )
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
-
-        if encoder_hidden_states is not None:
-            encoder_hidden_states, hidden_states = (
-                hidden_states[:, : encoder_hidden_states.shape[1]],
-                hidden_states[:, encoder_hidden_states.shape[1] :],
-            )
-
-            # linear proj
-            hidden_states = attn.to_out[0](hidden_states)
-            # dropout
-            hidden_states = attn.to_out[1](hidden_states)
-
-            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
-
-            return hidden_states, encoder_hidden_states
-        else:
-            return hidden_states
 
 class ZeroResBlock(nn.Module):
     def __init__(self, dim):
@@ -155,13 +61,13 @@ class ZeroResBlock(nn.Module):
 class ReduxImageEncoderOutput(BaseOutput):
     image_embeds: Optional[torch.Tensor] = None
 
-class Rearrange(nn.Module):
-    def __init__(self, pattern, any_dict):
-        super().__init__()
-        self.pattern = pattern
-        self.any_dict = any_dict
-    def forward(self, x):
-        return rearrange(x, self.pattern, **self.any_dict)
+# class Rearrange(nn.Module):
+#     def __init__(self, pattern, any_dict):
+#         super().__init__()
+#         self.pattern = pattern
+#         self.any_dict = any_dict
+#     def forward(self, x):
+#         return rearrange(x, self.pattern, **self.any_dict)
 
 class ReduxImageEncoder(ModelMixin, ConfigMixin):
     @register_to_config
@@ -185,7 +91,8 @@ class ReduxImageEncoder(ModelMixin, ConfigMixin):
                 txt_in_features * 3, 
                 txt_in_features,
             ),
-            Rearrange('b (h h2) (w w2) c -> b h w (c h2 w2)', {'h2': 2, 'w2': 2}), # pixunshuffle
+            # Rearrange('b (h h2) (w w2) c -> b h w (c h2 w2)', {'h2': 2, 'w2': 2}), # pixunshuffle
+            Rearrange('b (h h2) (w w2) c -> b h w (c h2 w2)', h2=2, w2=2), # pixunshuffle
             nn.Linear(
                 txt_in_features * 4, 
                 txt_in_features, 
@@ -207,22 +114,17 @@ class ReduxImageEncoder(ModelMixin, ConfigMixin):
                     new_linear.weight[j, base + 3] = 0.25
                 new_linear.bias.zero_()
 
+    @torch.compile
     def forward(self, x: torch.Tensor) -> ReduxImageEncoderOutput:
-        projected_x = self.siglip_projector(x)
+        # projected_x = self.siglip_projector(x)
+        projected_x = checkpoint_sequential(self.siglip_projector, 1, x, use_reentrant=False)
         return ReduxImageEncoderOutput(image_embeds=projected_x)
     
 class UnivaDenoiseTower_V1_1(UnivaDenoiseTower):
 
     def __init__(self, config: UnivaDenoiseTowerConfig):
         super().__init__(config)
-        # self.replace_sdpa_to_flexattn()
         self.siglip_projector = ReduxImageEncoder()
-
-    def replace_sdpa_to_flexattn(self):
-        for m in self.denoiser.transformer_blocks:
-            m.attn.processor = FluxFlexAttnProcessor2_0()
-        for m in self.denoiser.single_transformer_blocks:
-            m.attn.processor = FluxFlexAttnProcessor2_0()
 
     @torch.compile
     def compile_forward(

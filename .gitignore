@@ -25,3 +25,8 @@ VLMEvalKit
 **/.gradio
 *_demo
 tests
+imgedit_remove_test_rej
+imgedit_remove_test_app
+comfyui
+bagel_demo_app
+bagel_demo_rej

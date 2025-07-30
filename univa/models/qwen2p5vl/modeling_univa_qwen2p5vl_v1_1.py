@@ -18,14 +18,14 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
 from univa.models.qwen2p5vl.configuration_univa_qwen2p5vl import UnivaQwen2p5VLConfig
 from univa.models.modeling_univa_denoise_tower_v1_1 import UnivaDenoiseTower_V1_1
 from torch.utils.checkpoint import checkpoint
-import torch.distributed as dist
-_orig_all_reduce = dist.all_reduce
-dist._ar_count = 0
-def debug_all_reduce(tensor, *args, **kwargs):
-    dist._ar_count += 1
-    print(f"[Rank {dist.get_rank()}] all_reduce #{dist._ar_count}, size={tensor.numel()}")
-    return _orig_all_reduce(tensor, *args, **kwargs)
-dist.all_reduce = debug_all_reduce
+# import torch.distributed as dist
+# _orig_all_reduce = dist.all_reduce
+# dist._ar_count = 0
+# def debug_all_reduce(tensor, *args, **kwargs):
+#     dist._ar_count += 1
+#     print(f"[Rank {dist.get_rank()}] all_reduce #{dist._ar_count}, size={tensor.numel()}")
+#     return _orig_all_reduce(tensor, *args, **kwargs)
+# dist.all_reduce = debug_all_reduce
 
 
 class UnivaQwen2p5VLModel(Qwen2_5_VLModel):
@@ -534,7 +534,7 @@ class UnivaQwen2p5VLForConditionalGeneration_V1_1(Qwen2_5_VLPreTrainedModel, Gen
                     # outputs_ref_features = self.denoise_tower.vae_projector(ref_features_for_vlm)
                     outputs_ref_features = self.denoise_tower.vae_projector(ref_features_for_vlm)
                     outputs = torch.cat([outputs, outputs_ref_features], dim=1)
-                print(f"rank: {dist.get_rank()}, siglip_hidden_states: {siglip_hidden_states.shape if siglip_hidden_states is not None else 'None'}, self.config.image_end_token_id: {self.config.image_end_token_id}")
+                # print(f"rank: {dist.get_rank()}, siglip_hidden_states: {siglip_hidden_states.shape if siglip_hidden_states is not None else 'None'}, self.config.image_end_token_id: {self.config.image_end_token_id}")
 
                 # if siglip_hidden_states is not None:
                 #     print(f"rank: {dist.get_rank()}, enter siglip_hidden_states is not None")
@@ -578,7 +578,7 @@ class UnivaQwen2p5VLForConditionalGeneration_V1_1(Qwen2_5_VLPreTrainedModel, Gen
                 if dummy:
                     assert torch.allclose(outputs, outputs_bak)
                     assert torch.allclose(attention_mask, attention_mask_bak)
-                print(f"rank: {dist.get_rank()}, after unified siglip branch")
+                # print(f"rank: {dist.get_rank()}, after unified siglip branch")
 
             if output_type == "denoise_embeds":
                 # LVLM outputs -> MLP2 -> prompt_embeds

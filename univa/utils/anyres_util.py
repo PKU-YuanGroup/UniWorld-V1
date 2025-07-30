@@ -24,7 +24,7 @@ def dynamic_resize(h, w, anyres='any_1ratio', anchor_pixels=1024 * 1024, stride=
     base_area = base_h * base_w
 
     # 计算在该比例和 stride 对齐下，能接近 anchor_pixels 的放缩因子
-    scale = round(math.sqrt(anchor_pixels / base_area))
+    scale = int(math.sqrt(anchor_pixels / base_area))
 
     new_h = base_h * scale
     new_w = base_w * scale

@@ -173,11 +173,11 @@ class JointModel(nn.Module):
         self.siglip_model = siglip_model
         self.num_layers = len(list(self.siglip_model.modules()))
     
-    def drop_lora(self):
+    def drop_lora(self, drop_lora_rate=None):
         if self.args.training_config.drop_lora_layer_wise:
-            drops = torch.rand(self.num_layers) < self.args.training_config.drop_lora_rate
+            drops = torch.rand(self.num_layers) < (drop_lora_rate or self.args.training_config.drop_lora_rate)
         else:
-            drops = torch.rand(1) < self.args.training_config.drop_lora_rate
+            drops = torch.rand(1) < (drop_lora_rate or self.args.training_config.drop_lora_rate)
         # print('drops', drops)
         index = 0
         for module in self.siglip_model.modules():
@@ -242,7 +242,7 @@ class JointModel(nn.Module):
                 "encoder_hidden_states": encoder_hidden_states,
             })
         # if self.args.dataset_config.anyres == 'any_1ratio':
-        #     return self.lvlm_model.compile_forward(**kwargs)
+        # return self.lvlm_model.compile_forward(**kwargs)
         # else:
         return self.lvlm_model(**kwargs)
 
@@ -505,9 +505,9 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
     if args.training_config.gradient_checkpointing:
         lvlm_model.denoiser.enable_gradient_checkpointing()
 
-    if args.dataset_config.anyres == 'any_1ratio':
-        siglip_model = torch.compile(siglip_model)
-        vae = torch.compile(vae)
+    # if args.dataset_config.anyres == 'any_1ratio':
+        # vae.encode = torch.compile(vae.encode)
+    
     joint_model = JointModel(args, lvlm_model, siglip_model)
 
     # Setup model saving and loading
@@ -1225,6 +1225,25 @@ def main(args: UnivaTrainingDenoiseConfig, attn_implementation='sdpa'):
                                 empty_t5_prompt_embeds=empty_t5_prompt_embeds, 
                                 empty_pooled_prompt_embeds=empty_pooled_prompt_embeds, 
                             )
+                        if args.training_config.drop_lora_rate > 0.0:
+
+                            accelerator.unwrap_model(joint_model).drop_lora(1.0)
+                            unwrapped_siglip_model = accelerator.unwrap_model(joint_model).siglip_model
+
+                            for image_path in base_eval_image_paths:
+                                log_validation(
+                                    accelerator=accelerator,
+                                    weight_dtype=weight_dtype,
+                                    args=args,
+                                    siglip_model=unwrapped_siglip_model,
+                                    siglip_processor=siglip_processor,
+                                    pipe=pipe,
+                                    unwrapped_lvlm_model=unwrapped_lvlm_model,
+                                    image_path=image_path,
+                                    title="all_lora_drop",
+                                    empty_t5_prompt_embeds=empty_t5_prompt_embeds, 
+                                    empty_pooled_prompt_embeds=empty_pooled_prompt_embeds, 
+                                )
                     
 
                     if len(base_eval_image_paths) > 0:
